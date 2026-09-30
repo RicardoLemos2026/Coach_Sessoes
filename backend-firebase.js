@@ -50,7 +50,8 @@ export async function criarBackend(firebaseConfig) {
           (e) => { console.error('watch', col, e); onErr && onErr(e); });
       },
       watchDoc(col, id, cb, onErr) {
-        return F.onSnapshot(F.doc(db, col, id), (d) => cb(d.exists() ? snap2obj(d) : null),
+        // ignora a versão local ainda não gravada no servidor: evita ler antes das regras enxergarem o documento
+        return F.onSnapshot(F.doc(db, col, id), { includeMetadataChanges: true }, (d) => { if (!d.metadata.hasPendingWrites) cb(d.exists() ? snap2obj(d) : null); },
           (e) => { console.error('watchDoc', col, id, e); onErr && onErr(e); });
       },
       async get(col, id) {

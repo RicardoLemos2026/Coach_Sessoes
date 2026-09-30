@@ -2,7 +2,8 @@ import { firebaseConfig, NOME_SISTEMA } from './firebase-config.js';
 import { calcularPagamento, cfgCoach, tipoSugerido, fmtUSD, CONFIG_PADRAO } from './calculo.js';
 
 // ============================================================ backend
-const configurado = firebaseConfig.apiKey && firebaseConfig.apiKey !== 'COLE_AQUI';
+// ?demo na URL força o modo demonstração mesmo com o Firebase configurado
+const configurado = firebaseConfig.apiKey && firebaseConfig.apiKey !== 'COLE_AQUI' && !new URLSearchParams(location.search).has('demo');
 const B = configurado
   ? await (await import('./backend-firebase.js')).criarBackend(firebaseConfig)
   : await (await import('./backend-demo.js')).criarBackend();
@@ -95,14 +96,24 @@ function assinarSessoes() {
   S.pronto.sessoes = false;
   sub('sessoes', B.db.watch('sessoes', filtros, (l) => { S.sessoes = l; S.pronto.sessoes = true; render(); }, erroLeitura));
 }
-function erroLeitura(e) { toast('Não foi possível carregar os dados: ' + msgErro(e), true); }
+// Um listener recusado não volta sozinho: tenta de novo algumas vezes (ex.: logo após ativar o perfil)
+let tentativasLeitura = 0, timerLeitura = null;
+function erroLeitura(e) {
+  if (timerLeitura) return;                        // vários listeners falham juntos: trata uma vez só
+  if (tentativasLeitura < 3 && S.perfil) {
+    tentativasLeitura++;
+    timerLeitura = setTimeout(() => { timerLeitura = null; S.pronto = {}; iniciarDados(); }, 1500 * tentativasLeitura);
+    return;
+  }
+  toast('Não foi possível carregar os dados: ' + msgErro(e) + ' Recarregue a página.', true);
+}
 
 function iniciarDados() {
   const chave = uid() + ':' + S.perfil.papel;
   if (S.pronto.chave === chave) return;
   S.pronto = { chave };
   if (leitor()) {
-    sub('usuarios', B.db.watch('users', [], (l) => { S.usuarios = l; render(); }, erroLeitura));
+    sub('usuarios', B.db.watch('users', [], (l) => { S.usuarios = l; tentativasLeitura = 0; render(); }, erroLeitura));
     sub('clientes', B.db.watch('clientes', [], (l) => { S.clientes = l; render(); }, erroLeitura));
     sub('fech', B.db.watch('fechamentos', [], (l) => { S.fechamentos = l; render(); }, erroLeitura));
     S.view ||= isFin() ? 'valores' : 'painel';
