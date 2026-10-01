@@ -862,6 +862,18 @@ const acoes = {
   },
 };
 
+// As regras do Firestore leem no máximo 20 documentos diferentes por lote. Cada sessão faz as regras
+// consultarem o fechamento do seu mês, então os lotes de sessões são separados por coach + mês.
+async function gravarPorMes(ops, progresso) {
+  const grupos = new Map();
+  for (const o of ops) { const k = o.chave || ''; if (!grupos.has(k)) grupos.set(k, []); grupos.get(k).push(o); }
+  let i = 0;
+  for (const lote of grupos.values()) {
+    i++; progresso && progresso(i, grupos.size);
+    await B.db.batch(lote.map(({ chave, ...o }) => o));
+  }
+}
+
 async function aprovarVarias(ids) {
   if (!ids.length) return;
   const extra = quemRevisa();
@@ -990,10 +1002,9 @@ const forms = {
     await tentar(async () => {
       const ss = await B.db.list('sessoes', [['clienteId', '==', origem.id]]);
       const abertas = ss.filter((s) => !fechado(s.coachId, s.mes));
-      await B.db.batch([
-        ...abertas.map((s) => ({ op: 'update', col: 'sessoes', id: s.id, data: { clienteId: destino.id, clienteNome: destino.nome } })),
-        { op: 'update', col: 'clientes', id: origem.id, data: { ativo: false, mescladoEm: destino.id } },
-      ]);
+      await gravarPorMes(abertas.map((s) => ({ op: 'update', col: 'sessoes', id: s.id, chave: `${s.coachId}_${s.mes}`,
+        data: { clienteId: destino.id, clienteNome: destino.nome } })));
+      await B.db.update('clientes', origem.id, { ativo: false, mescladoEm: destino.id });
       toast(`${abertas.length} lançamento(s) passaram para "${destino.nome}".${ss.length - abertas.length ? ` ${ss.length - abertas.length} em meses fechados ficaram como estavam.` : ''}`);
     });
   },
@@ -1068,7 +1079,7 @@ const forms = {
       for (const s of h.sessoes.filter((x) => x.coach === c.chave)) {
         if (fechado(alvo, s.mes)) { pulados.add(s.mes); continue; }
         nS++;
-        ops.push({ op: 'set', col: 'sessoes', id: `imp_${alvo}_${slug(s.linha)}`, data: {
+        ops.push({ op: 'set', col: 'sessoes', id: `imp_${alvo}_${slug(s.linha)}`, chave: `${alvo}_${s.mes}`, data: {
           coachId: alvo, clienteId: idCliente[s.cliente], clienteNome: s.cliente, data: s.data, mes: s.mes, quantidade: s.quantidade,
           servico: s.servico, obs: s.nomeOriginal !== s.cliente ? `Na planilha: ${s.nomeOriginal}` : '', status: 'aprovada', importado: true,
           revisadoPorNome: 'Importado da planilha', criadoEm: B.db.agora() } });
@@ -1085,7 +1096,13 @@ const forms = {
       resumoImp.push(`${c.nome}: ${nS} sessões, ${nF} meses fechados${pulados.size ? ` (pulados por já estarem fechados: ${[...pulados].map(mesLabel).join(', ')})` : ''}`);
     }
     if (!ops.length && !fechOps.length) return toast('Escolha pelo menos um coach para importar.', true);
-    const ok = await tentar(async () => { await B.db.batch(ops); await B.db.batch(fechOps); });
+    const prog = (t) => { const el = document.querySelector('form[data-form="importar"] .dica'); if (el) el.textContent = t; };
+    const ok = await tentar(async () => {
+      const sessOps = ops.filter((o) => o.col === 'sessoes');
+      await B.db.batch(ops.filter((o) => o.col !== 'sessoes'));           // usuários e clientes
+      await gravarPorMes(sessOps, (i, n) => prog(`Gravando sessões: mês ${i} de ${n}…`));
+      await B.db.batch(fechOps);
+    });
     if (ok === undefined) return;
     toast('Importação concluída. ' + resumoImp.join(' · '));
     S.importacao = null; render();
