@@ -595,6 +595,7 @@ function lerValores(u) {
 
 // ============================================================ FINANCEIRO: tabela de valores e conferência
 const pillConf = (f) => (!f || f.status !== 'fechado') ? '<span class="pill p-aberto">Aguardando fechamento</span>'
+  : f.origem === 'planilha' && !f.conferencia ? '<span class="pill p-fechado">Histórico (planilha)</span>'
   : f.conferencia?.status === 'ok' ? '<span class="pill p-aprovada">Valores conferidos</span>'
   : f.conferencia?.status === 'divergencia' ? '<span class="pill p-recusada">Divergência</span>'
   : '<span class="pill p-pendente">A conferir</span>';
@@ -635,8 +636,22 @@ function vValores() {
     return `<tr ${c.id === S.coachSel ? 'style="background:var(--accent-soft)"' : ''}><td><b>${esc(c.nome)}</b></td><td>${pillMes(c.id, S.mes)}</td><td class="r">${valor}</td><td>${pillConf(f)}</td>
       <td class="r"><button class="btn sm ${f?.status === 'fechado' && !f.conferencia ? 'pri' : ''}" data-acao="verValores" data-coach="${c.id}">Ver detalhes</button></td></tr>`;
   }).join('');
-  return `<div class="cab"><div><h1>Conferência de valores</h1><p>Confira o valor de cada coach depois que a Bia fechar o mês.</p></div>${seletorMes()}</div>
-    <section class="card">${cs.length ? `<div class="tabwrap"><table><thead><tr><th>Coach</th><th>Mês</th><th class="r">Valor</th><th>Conferência</th><th></th></tr></thead><tbody>${linhasTab}</tbody></table></div>` : '<div class="vazio">Nenhum coach cadastrado.</div>'}</section>
+  // fila: meses fechados pela Bia (no sistema) que ainda não foram conferidos, em qualquer mês
+  const fila = S.fechamentos.filter((f) => f.status === 'fechado' && f.origem !== 'planilha' && !f.conferencia)
+    .sort((a, b) => a.mes.localeCompare(b.mes) || (usuario(a.coachId)?.nome || '').localeCompare(usuario(b.coachId)?.nome || ''));
+  const divs = S.fechamentos.filter((f) => f.status === 'fechado' && f.conferencia?.status === 'divergencia');
+  const nHist = S.fechamentos.filter((f) => f.origem === 'planilha').length;
+  const filaHTML = `<section class="card"><div class="cab"><h2>Aguardando sua conferência</h2><span class="nota">${fila.length} mês(es)</span></div>
+    ${fila.length ? `<div class="tabwrap"><table><thead><tr><th>Coach</th><th>Mês</th><th class="r">Valor fechado</th><th>Fechado em</th><th></th></tr></thead><tbody>
+      ${fila.map((f) => `<tr><td><b>${esc(usuario(f.coachId)?.nome || '—')}</b></td><td>${mesLabel(f.mes)}</td><td class="r">${fmtUSD(f.total)}</td><td>${fmtDataHora(f.fechadoEm)}${f.fechadoPorNome ? ' · ' + esc(f.fechadoPorNome) : ''}</td>
+        <td class="r"><button class="btn sm pri" data-acao="irValores" data-coach="${f.coachId}" data-mes="${f.mes}">Conferir</button></td></tr>`).join('')}</tbody></table></div>`
+      : `<div class="vazio" style="padding:14px">Nenhum mês aguardando conferência. Os meses aparecem aqui assim que a Bia fecha.</div>`}
+    ${divs.length ? `<p class="nota">${divs.length} mês(es) com divergência apontada, aguardando correção: ${divs.map((f) => `<button class="link" data-acao="irValores" data-coach="${f.coachId}" data-mes="${f.mes}">${esc(usuario(f.coachId)?.nome || '')} · ${mesLabel(f.mes)}</button>`).join(', ')}.</p>` : ''}
+    ${nHist ? `<p class="nota">O histórico importado das planilhas (${nHist} meses fechados) está na aba <button class="link" data-acao="ir" data-view="fechamentos">Fechamentos</button> ou navegando pelos meses com as setas.</p>` : ''}
+  </section>`;
+  return `<div class="cab"><div><h1>Conferência de valores</h1><p>Confira o valor de cada coach depois que a Bia fechar o mês. Durante o mês, os valores aparecem como parciais (só sessões já aprovadas).</p></div>${seletorMes()}</div>
+    ${filaHTML}
+    <section class="card"><div class="cab"><h2>Coaches em ${mesLabel(S.mes)}</h2></div>${cs.length ? `<div class="tabwrap"><table><thead><tr><th>Coach</th><th>Mês</th><th class="r">Valor</th><th>Conferência</th><th></th></tr></thead><tbody>${linhasTab}</tbody></table></div>` : '<div class="vazio">Nenhum coach cadastrado.</div>'}</section>
     ${S.coachSel ? detalheValores(S.coachSel) : ''}`;
 }
 
@@ -852,6 +867,7 @@ const acoes = {
   async resetSenha(d) { await tentar(() => B.auth.reset(d.email), `E-mail de nova senha enviado para ${d.email}.`); },
   csv(d) { exportarCSV(d.coach, S.mes); },
   verValores(d) { S.coachSel = d.coach; render(); },
+  irValores(d) { S.coachSel = d.coach; S.mes = d.mes; S.view = 'valores'; assinarSessoes(); render(); window.scrollTo(0, 0); },
   async conferirValores(d) {
     await tentar(() => B.db.update('fechamentos', `${d.coach}_${S.mes}`, { conferencia: { status: 'ok', comentario: '', porNome: S.perfil.nome, por: uid(), em: new Date().toISOString() } }),
       'Valores marcados como conferidos.');
