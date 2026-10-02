@@ -105,13 +105,17 @@ function erroLeitura(e) {
     timerLeitura = setTimeout(() => { timerLeitura = null; S.pronto = {}; iniciarDados(); }, 1500 * tentativasLeitura);
     return;
   }
-  toast('Não foi possível carregar os dados: ' + msgErro(e) + ' Recarregue a página.', true);
+  // aviso fixo no topo da tela (o toast some e a tela parece apenas vazia)
+  S.erroLeitura = (e?.code || '').includes('permission-denied')
+    ? 'O banco de dados recusou a leitura para o seu perfil. Avise o administrador: as regras de segurança do Firestore precisam estar atualizadas.'
+    : 'Não foi possível carregar os dados: ' + msgErro(e) + ' Recarregue a página.';
+  render();
 }
 
 function iniciarDados() {
   const chave = uid() + ':' + S.perfil.papel;
   if (S.pronto.chave === chave) return;
-  S.pronto = { chave };
+  S.pronto = { chave }; S.erroLeitura = null;
   if (leitor()) {
     sub('usuarios', B.db.watch('users', [], (l) => { S.usuarios = l; tentativasLeitura = 0; render(); }, erroLeitura));
     sub('clientes', B.db.watch('clientes', [], (l) => { S.clientes = l; render(); }, erroLeitura));
@@ -165,7 +169,8 @@ function tela() {
   if (S.perfil === undefined) return '<div class="carregando">Carregando…</div>';
   if (!S.perfil) return telaSemPerfil();
   if (S.perfil.ativo === false) return telaSimples('Acesso desativado', 'Seu acesso foi desativado. Fale com o administrador do sistema.');
-  return topo() + `<main>${conteudo()}</main>` + (S.modal ? modal() : '');
+  const erro = S.erroLeitura ? `<div class="aviso erro"><div><b>Dados não carregados.</b> ${esc(S.erroLeitura)}</div></div>` : '';
+  return topo() + `<main>${erro}${conteudo()}</main>` + (S.modal ? modal() : '');
 }
 
 function telaSimples(t, p, extra = '') {
