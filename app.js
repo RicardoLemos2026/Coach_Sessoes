@@ -1006,9 +1006,13 @@ const forms = {
       valorInformado = Math.round(parseFloat(val('eb-valor')) * 100) / 100;
       if (!(valorInformado > 0)) return toast('Informe o valor cobrado.', true);
     }
+    // lê todos os campos ANTES de fechar a janela (depois de fechar, os campos não existem mais)
+    const quantidade = parseInt(val('eb-qtd'), 10);
+    if (!(quantidade >= 1 && quantidade <= 20)) return toast('Quantidade deve ser um número inteiro entre 1 e 20.', true);
+    if (!cli) return toast('Selecione o cliente.', true);
     S.modal = null; render();
     await tentar(() => B.db.update('sessoes', id, { data, mes: data.slice(0, 7), clienteId: cli.id, clienteNome: cli.nome, servico, valorInformado,
-      quantidade: parseInt(val('eb-qtd'), 10), corrigidoPorNome: S.perfil.nome, ...(aprovar ? { status: 'aprovada', comentario: '', ...quemRevisa() } : {}) }), 'Lançamento corrigido.');
+      quantidade, corrigidoPorNome: S.perfil.nome, ...(aprovar ? { status: 'aprovada', comentario: '', ...quemRevisa() } : {}) }), 'Lançamento corrigido.');
   },
   async ajuste() {
     const coachId = S.coachSel, mes = S.mes;
