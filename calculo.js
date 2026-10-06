@@ -8,15 +8,29 @@ export const CONFIG_PADRAO = {
   bonusRecorrencia: 10,  // bônus por cliente com minSessoesBonus ou mais sessões no mês
   minSessoesBonus: 2,
   bonusAtivo: 10,        // bônus por cliente ativo (cliente distinto atendido no mês)
-  extras: [],            // serviços com valor próprio: [{id, nome, valor, livre}]; livre = valor digitado em cada lançamento
+  extras: [],            // serviços com valor próprio: [{id, nome, valor, livre, percentual}]
+                         // livre = o coach digita o valor cobrado do cliente; percentual = parte desse valor paga ao coach
 };
 
 const c = (v) => Math.round(Number(v || 0) * 100);
 export const dinheiro = (cent) => cent / 100;
 
+// Regra da casa: no Perfil comportamental o coach recebe 70% do valor cobrado,
+// a menos que a tabela de valores defina outro percentual para o coach.
+export const PERCENTUAL_PADRAO = { 'perfil-comportamental': 70 };
+
 export function cfgCoach(u) {
-  return { ...CONFIG_PADRAO, ...(u?.config || {}) };
+  const cfg = { ...CONFIG_PADRAO, ...(u?.config || {}) };
+  cfg.extras = (cfg.extras || []).map((e) => (e.livre && e.percentual == null && PERCENTUAL_PADRAO[e.id] != null
+    ? { ...e, percentual: PERCENTUAL_PADRAO[e.id] } : e));
+  return cfg;
 }
+
+/** Percentual pago ao coach num serviço de valor livre (100 quando não há regra). */
+export const percentualDe = (ex) => (ex && ex.livre && Number(ex.percentual) > 0 ? Number(ex.percentual) : 100);
+
+/** Valor pago ao coach por unidade de um serviço de valor livre, em dólares (arredondado ao centavo). */
+export const valorPagoUnit = (ex, valorCobrado) => dinheiro(Math.round(c(valorCobrado) * percentualDe(ex) / 100));
 
 /** Tipo sugerido para um cliente novo, conforme a regra da carteira. */
 export function tipoSugerido(cfg, clientesDoCoach) {
@@ -40,7 +54,8 @@ export function calcularPagamento(cfg, clientes, sessoes, ajustes = []) {
   const extras = new Map();       // extraId -> qtd
   const livres = new Map();       // extraId -> {c: centavos somados, valores: Set}
   let semTipo = 0, semValor = 0;
-  const livre = (id) => (cfg.extras || []).some((e) => e.id === id && e.livre);
+  const extraDe = (id) => (cfg.extras || []).find((e) => e.id === id);
+  const livre = (id) => !!extraDe(id)?.livre;
 
   for (const s of sessoes) {
     const q = Number(s.quantidade || 0);
@@ -50,8 +65,9 @@ export function calcularPagamento(cfg, clientes, sessoes, ajustes = []) {
       if (livre(s.servico)) {
         const v = Number(s.valorInformado);
         if (!(v > 0)) semValor += q;
-        const l = livres.get(s.servico) || { c: 0, valores: new Set() };
-        l.c += c(v > 0 ? v : 0) * q; l.valores.add(v > 0 ? v : 0);
+        const l = livres.get(s.servico) || { c: 0, cobrado: 0, valores: new Set() };
+        const pago = v > 0 ? valorPagoUnit(extraDe(s.servico), v) : 0;
+        l.c += c(pago) * q; l.cobrado += c(v > 0 ? v : 0) * q; l.valores.add(pago);
         livres.set(s.servico, l);
       }
       continue;
@@ -85,7 +101,9 @@ export function calcularPagamento(cfg, clientes, sessoes, ajustes = []) {
     if (ex.livre) {
       const l = livres.get(ex.id);
       // valorUnit = null quando os valores digitados variam entre os lançamentos
-      linhas.push({ chave: 'extra:' + ex.id, descricao: ex.nome, livre: true,
+      const pct = percentualDe(ex);
+      linhas.push({ chave: 'extra:' + ex.id, descricao: pct < 100 ? `${ex.nome} (${pct}% do valor cobrado)` : ex.nome, livre: true,
+        percentual: pct, cobrado: dinheiro(l.cobrado),
         valorUnit: l.valores.size === 1 ? [...l.valores][0] : null, quantidade: q, total: dinheiro(l.c) });
     } else add(ex.nome, Number(ex.valor), q, 'extra:' + ex.id);
   }

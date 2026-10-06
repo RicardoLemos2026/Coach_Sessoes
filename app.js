@@ -1,5 +1,5 @@
 import { firebaseConfig, NOME_SISTEMA } from './firebase-config.js';
-import { calcularPagamento, cfgCoach, tipoSugerido, fmtUSD, CONFIG_PADRAO } from './calculo.js';
+import { calcularPagamento, cfgCoach, tipoSugerido, fmtUSD, CONFIG_PADRAO, percentualDe, valorPagoUnit } from './calculo.js';
 
 // ============================================================ backend
 // ?demo na URL força o modo demonstração mesmo com o Firebase configurado
@@ -79,8 +79,24 @@ const sessoesDe = (coachId, mes = S.mes) => S.sessoes.filter((s) => s.coachId ==
   .sort((a, b) => a.data.localeCompare(b.data) || (toDate(a.criadoEm)?.getTime() || 0) - (toDate(b.criadoEm)?.getTime() || 0));
 const nomeServico = (cfg, id) => (!id || id === 'sessao' ? 'Sessão' : cfg.extras.find((e) => e.id === id)?.nome || id);
 const extraLivre = (cfg, id) => !!cfg.extras.find((e) => e.id === id && e.livre);
-const servicoHTML = (cfg, s) => esc(nomeServico(cfg, s.servico)) + (extraLivre(cfg, s.servico)
-  ? (Number(s.valorInformado) > 0 ? `<div class="nota num">${fmtUSD(s.valorInformado)}${s.quantidade > 1 ? ' cada' : ''}</div>` : '<div class="nota" style="color:var(--bad)">sem valor informado</div>') : '');
+const extraDe = (cfg, id) => cfg.extras.find((e) => e.id === id);
+// "70% de $350,00 = $245,00" — cálculo do que é pago ao coach num serviço de valor livre
+function textoCalculo(ex, valor, qtd = 1) {
+  const v = Number(valor);
+  if (!(v > 0)) return '';
+  const pct = percentualDe(ex), unit = valorPagoUnit(ex, v);
+  const tot = Math.round(unit * 100) * (qtd || 1) / 100;
+  if (pct >= 100) return qtd > 1 ? `${qtd} × ${fmtUSD(v)} = ${fmtUSD(tot)}` : '';
+  return `Pago ao coach: ${pct}% de ${fmtUSD(v)} = ${fmtUSD(unit)}${qtd > 1 ? ` × ${qtd} = ${fmtUSD(tot)}` : ''}`;
+}
+const servicoHTML = (cfg, s) => {
+  const ex = extraDe(cfg, s.servico);
+  if (!ex?.livre) return esc(nomeServico(cfg, s.servico));
+  const v = Number(s.valorInformado);
+  if (!(v > 0)) return esc(ex.nome) + '<div class="nota" style="color:var(--bad)">sem valor informado</div>';
+  const pct = percentualDe(ex);
+  return esc(ex.nome) + `<div class="nota num">Cobrado ${fmtUSD(v)}${s.quantidade > 1 ? ' cada' : ''}${pct < 100 ? ` · <b>pago ${fmtUSD(valorPagoUnit(ex, v))}</b> (${pct}%)` : ''}</div>`;
+};
 
 function resumo(coachId, mes, statusIncluidos = ['aprovada']) {
   const cfg = cfgCoach(usuario(coachId));
@@ -267,7 +283,8 @@ function vLancar() {
       <div class="campo" ${S.novoCliente ? '' : 'hidden'}><label for="f-novo">Nome do cliente novo</label><input id="f-novo" placeholder="Nome e sobrenome" ${S.novoCliente ? 'required' : ''}></div>
       <div class="campo"><label for="f-servico">Serviço</label><select id="f-servico" data-change="servico">
         <option value="sessao">Sessão</option>${cfg.extras.map((x) => `<option value="${x.id}" ${e?.servico === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select></div>
-      <div class="campo" ${extraLivre(cfg, S.servicoSel) ? '' : 'hidden'}><label for="f-valor">Valor cobrado ($)</label><input id="f-valor" type="number" min="0.01" step="0.01" placeholder="Ex.: 350" value="${e?.valorInformado ?? ''}" ${extraLivre(cfg, S.servicoSel) ? 'required' : ''}></div>
+      <div class="campo" ${extraLivre(cfg, S.servicoSel) ? '' : 'hidden'}><label for="f-valor">Valor cobrado ($)</label><input id="f-valor" type="number" min="0.01" step="0.01" placeholder="Ex.: 350" value="${e?.valorInformado ?? ''}" ${extraLivre(cfg, S.servicoSel) ? 'required' : ''}>
+        <div class="dica num" id="f-calc" data-servico="${esc(S.servicoSel)}">${esc(textoCalculo(extraDe(cfg, S.servicoSel), e?.valorInformado, e?.quantidade || 1))}</div></div>
       <div class="campo"><label for="f-qtd">Quantidade</label><input id="f-qtd" type="number" min="1" max="20" step="1" required value="${e ? e.quantidade : 1}"></div>
       <div class="campo largo"><label for="f-obs">Observação (opcional)</label><input id="f-obs" maxlength="300" value="${esc(e?.obs || '')}" placeholder="Ex.: sessão remarcada do dia 12"></div>
     </div>
@@ -331,7 +348,7 @@ function cardResumo(coachId, mes, painelBia) {
 function tabelaLinhas(linhas, ajustes, editavel, coachId, mes) {
   if (!linhas.length && !ajustes.length) return '<div class="vazio" style="padding:14px">Nenhum valor neste mês ainda.</div>';
   return `<table class="resumo"><tbody>
-    ${linhas.map((l) => `<tr><td>${esc(l.descricao)}<div class="nota num">${l.valorUnit == null ? `${l.quantidade} lançamento(s) · valores informados` : `${l.quantidade} × ${fmtUSD(l.valorUnit)}`}</div></td><td class="r">${fmtUSD(l.total)}</td></tr>`).join('')}
+    ${linhas.map((l) => `<tr><td>${esc(l.descricao)}<div class="nota num">${l.livre && l.percentual < 100 ? `${l.percentual}% de ${fmtUSD(l.cobrado)} cobrado (${l.quantidade} lançamento${l.quantidade > 1 ? 's' : ''})` : l.valorUnit == null ? `${l.quantidade} lançamento(s) · valores informados` : `${l.quantidade} × ${fmtUSD(l.valorUnit)}`}</div></td><td class="r">${fmtUSD(l.total)}</td></tr>`).join('')}
     ${ajustes.map((a) => `<tr><td>Ajuste: ${esc(a.descricao)}${editavel ? ` <button class="ico bad" data-acao="removerAjuste" data-id="${a.id}" data-coach="${coachId}" data-mes="${mes}">remover</button>` : ''}</td><td class="r">${fmtUSD(a.valor)}</td></tr>`).join('')}
   </tbody></table>`;
 }
@@ -352,7 +369,7 @@ function vCarteiraCoach() {
     </section>`;
 }
 function regraTexto(cfg) {
-  const extras = cfg.extras.map((x) => `${esc(x.nome)}: ${x.livre ? 'valor livre' : fmtUSD(x.valor)}`).join(' · ');
+  const extras = cfg.extras.map((x) => `${esc(x.nome)}: ${x.livre ? `valor livre${percentualDe(x) < 100 ? ` (coach recebe ${percentualDe(x)}%)` : ''}` : fmtUSD(x.valor)}`).join(' · ');
   return `Tipo A: ${fmtUSD(cfg.valorA)} por sessão · Tipo B: ${fmtUSD(cfg.valorB)} por sessão${cfg.limiteA ? ` · os ${cfg.limiteA} primeiros clientes ativos da carteira são Tipo A` : ''}${extras ? ' · ' + extras : ''} · bônus de ${fmtUSD(cfg.bonusAtivo)} por cliente ativo e ${fmtUSD(cfg.bonusRecorrencia)} por cliente com ${cfg.minSessoesBonus}+ sessões no mês.`;
 }
 function vHistoricoCoach() {
@@ -580,7 +597,7 @@ function camposValores(cfg, legenda) {
         <div class="campo"><label for="eu-bat">Bônus cliente ativo ($)</label><input id="eu-bat" type="number" step="0.01" min="0" value="${cfg.bonusAtivo}"></div>
         <div class="campo"><label for="eu-brec">Bônus recorrência ($)</label><input id="eu-brec" type="number" step="0.01" min="0" value="${cfg.bonusRecorrencia}"></div>
         <div class="campo"><label for="eu-min">Sessões p/ recorrência</label><input id="eu-min" type="number" min="2" step="1" value="${cfg.minSessoesBonus}"></div>
-        <div class="campo largo"><label for="eu-extras">Serviços extras (um por linha: nome | valor, ou nome | livre)</label><textarea id="eu-extras" placeholder="Mapeamento de perfil | 210&#10;Perfil comportamental | livre">${esc(cfg.extras.map((x) => `${x.nome} | ${x.livre ? 'livre' : x.valor}`).join('\n'))}</textarea></div>
+        <div class="campo largo"><label for="eu-extras">Serviços extras (um por linha: nome | valor, ou nome | livre 70%)</label><textarea id="eu-extras" placeholder="Mapeamento de perfil | 210&#10;Perfil comportamental | livre 70%">${esc(cfg.extras.map((x) => `${x.nome} | ${x.livre ? `livre${percentualDe(x) < 100 ? ` ${percentualDe(x)}%` : ''}` : x.valor}`).join('\n'))}</textarea></div>
       </div><p class="nota" style="margin:0">"Primeiros clientes Tipo A" = 0 quando o tipo de cada cliente é marcado manualmente. "livre" = o coach digita o valor em cada lançamento. Mudanças valem para meses abertos; meses fechados guardam os valores da época.</p></fieldset>`;
 }
 function lerValores(u) {
@@ -589,8 +606,11 @@ function lerValores(u) {
   const extras = val('eu-extras').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
     const [nome, v = ''] = l.split('|').map((x) => x.trim());
     const velho = antigos.find((x) => norm(x.nome) === norm(nome));
-    const livre = norm(v) === 'livre';
+    const m = norm(v).match(/^livre(?:\s+(\d+(?:[.,]\d+)?)\s*%?)?$/);   // "livre" ou "livre 70%"
+    const livre = !!m;
+    const percentual = m && m[1] ? Math.min(100, parseFloat(m[1].replace(',', '.'))) : (livre ? 100 : undefined);
     return { id: velho?.id || slug(nome) || Math.random().toString(36).slice(2, 8), nome, livre,
+      ...(livre ? { percentual } : {}),
       valor: livre ? 0 : Math.round(parseFloat(v.replace(',', '.')) * 100) / 100 };
   });
   if (extras.some((x) => !x.nome || !(x.valor >= 0))) { toast('Serviços extras: uma linha por serviço, no formato "Nome | valor" ou "Nome | livre".', true); return null; }
@@ -607,7 +627,7 @@ const pillConf = (f) => (!f || f.status !== 'fechado') ? '<span class="pill p-ab
 
 function vTabela() {
   const cs = coaches().filter((c) => c.ativo !== false);
-  const extrasTxt = (cfg) => cfg.extras.length ? cfg.extras.map((x) => `${esc(x.nome)}: ${x.livre ? '<i>valor livre</i>' : fmtUSD(x.valor)}`).join('<br>') : '<span class="nota">—</span>';
+  const extrasTxt = (cfg) => cfg.extras.length ? cfg.extras.map((x) => `${esc(x.nome)}: ${x.livre ? `<i>valor livre</i>${percentualDe(x) < 100 ? ` · <b>${percentualDe(x)}%</b> do cobrado` : ''}` : fmtUSD(x.valor)}`).join('<br>') : '<span class="nota">—</span>';
   return `<div class="cab"><div><h1>Tabela de valores</h1><p>Referência do que cada coach recebe. É esta tabela que o sistema usa para calcular os meses abertos.</p></div></div>
     <section class="card">${cs.length ? `<div class="tabwrap"><table><thead><tr><th>Coach</th><th class="r">Sessão Tipo A</th><th class="r">Sessão Tipo B</th><th>Regra de tipo</th><th class="r">Bônus cliente ativo</th><th class="r">Bônus recorrência</th><th>Serviços extras</th><th>Última alteração</th><th></th></tr></thead><tbody>
     ${cs.map((u) => { const cfg = cfgCoach(u); return `<tr><td><b>${esc(u.nome)}</b></td>
@@ -628,7 +648,7 @@ function refTabela(cfg, l) {
   if (l.chave === 'bonusRec') return cfg.bonusRecorrencia;
   if (l.chave === 'bonusAtivo') return cfg.bonusAtivo;
   if (l.chave?.startsWith('cli:')) { const c = S.clientes.find((x) => x.id === l.chave.slice(4)); return Number(c?.valorSessao) > 0 ? Number(c.valorSessao) : undefined; }
-  if (l.chave?.startsWith('extra:')) { const x = cfg.extras.find((e) => 'extra:' + e.id === l.chave); return x ? (x.livre ? 'livre' : x.valor) : undefined; }
+  if (l.chave?.startsWith('extra:')) { const x = cfg.extras.find((e) => 'extra:' + e.id === l.chave); return x ? (x.livre ? (percentualDe(x) < 100 ? `livre ${percentualDe(x)}%` : 'livre') : x.valor) : undefined; }
   return undefined;
 }
 
@@ -675,11 +695,11 @@ function detalheValores(coachId) {
   const rows = linhas.map((l) => {
     const ref = refTabela(cfg, l);
     const usado = l.valorUnit;
-    const bate = ref === undefined || ref === 'livre' || usado == null ? null : Math.round(ref * 100) === Math.round(usado * 100);
+    const bate = ref === undefined || typeof ref === 'string' || usado == null ? null : Math.round(ref * 100) === Math.round(usado * 100);
     if (bate === false) divergencias++;
     return `<tr><td>${esc(l.descricao)}</td><td class="r">${l.quantidade}</td>
       <td class="r">${usado == null ? '<span class="nota">variável</span>' : fmtUSD(usado)}</td>
-      <td class="r">${ref === undefined ? '<span class="nota">—</span>' : ref === 'livre' ? '<span class="nota">livre</span>' : fmtUSD(ref)}</td>
+      <td class="r">${ref === undefined ? '<span class="nota">—</span>' : typeof ref === 'string' ? `<span class="nota">${esc(ref)}</span>` : fmtUSD(ref)}</td>
       <td class="r"><b>${fmtUSD(l.total)}</b></td>
       <td>${bate === null ? '' : bate ? '<span class="pill p-aprovada">Confere</span>' : '<span class="pill p-recusada">Diferente</span>'}</td></tr>`;
   }).join('');
@@ -698,7 +718,9 @@ function detalheValores(coachId) {
     </section>
     <section class="card"><h2>Conferência</h2>
       ${conf ? `<div class="aviso ${conf.status === 'ok' ? 'fechado' : 'erro'}" style="margin-bottom:12px"><div><b>${conf.status === 'ok' ? 'Conferido' : 'Divergência'}</b> por ${esc(conf.porNome)} em ${fmtDataHora(conf.em)}${conf.comentario ? `<br>${esc(conf.comentario)}` : ''}</div></div>` : ''}
-      ${livres.length ? `<h3 style="margin:4px 0 6px">Serviços com valor livre</h3><table class="resumo"><tbody>${livres.map((s) => `<tr><td>${fmtDia(s.data)} · ${esc(mapa.get(s.clienteId)?.nome || s.clienteNome)}<div class="nota">${esc(nomeServico(cfg, s.servico))}${s.quantidade > 1 ? ` · ${s.quantidade}×` : ''}</div></td><td class="r">${Number(s.valorInformado) > 0 ? fmtUSD(s.valorInformado * s.quantidade) : '<span style="color:var(--bad)">sem valor</span>'}</td></tr>`).join('')}</tbody></table>` : ''}
+      ${livres.length ? `<h3 style="margin:4px 0 6px">Serviços com valor livre</h3><table class="resumo"><tbody>${livres.map((s) => { const ex = extraDe(cfg, s.servico); const v = Number(s.valorInformado); const pct = percentualDe(ex);
+        return `<tr><td>${fmtDia(s.data)} · ${esc(mapa.get(s.clienteId)?.nome || s.clienteNome)}<div class="nota num">${esc(nomeServico(cfg, s.servico))}${s.quantidade > 1 ? ` · ${s.quantidade}×` : ''}${v > 0 && pct < 100 ? ` · cobrado ${fmtUSD(v * s.quantidade)}, ${pct}% ao coach` : ''}</div></td>
+        <td class="r">${v > 0 ? fmtUSD(Math.round(valorPagoUnit(ex, v) * 100) * s.quantidade / 100) : '<span style="color:var(--bad)">sem valor</span>'}</td></tr>`; }).join('')}</tbody></table>` : ''}
       ${fech && (isFin() || isAdmin()) ? `<div class="acoes" style="margin-top:14px"><button class="btn pri" data-acao="conferirValores" data-coach="${coachId}">Valores conferidos</button>
         <button class="btn bad" data-acao="modal" data-tipo="divergencia" data-id="${coachId}">Apontar divergência</button>
         <button class="btn" data-acao="csv" data-coach="${coachId}">Exportar CSV</button></div>` : ''}
@@ -741,7 +763,8 @@ function modal() {
         <div class="campo"><label for="eb-data">Data</label><input id="eb-data" type="date" required value="${s.data}"></div>
         <div class="campo"><label for="eb-cliente">Cliente</label><select id="eb-cliente">${clientesDe(s.coachId).map((c) => `<option value="${c.id}" ${c.id === s.clienteId ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select></div>
         <div class="campo"><label for="eb-servico">Serviço</label><select id="eb-servico" data-change="servicoBia"><option value="sessao">Sessão</option>${cfg.extras.map((x) => `<option value="${x.id}" ${(m.servico ?? s.servico) === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select></div>
-        <div class="campo" ${extraLivre(cfg, m.servico ?? s.servico) ? '' : 'hidden'}><label for="eb-valor">Valor cobrado ($)</label><input id="eb-valor" type="number" min="0.01" step="0.01" value="${s.valorInformado ?? ''}"></div>
+        <div class="campo" ${extraLivre(cfg, m.servico ?? s.servico) ? '' : 'hidden'}><label for="eb-valor">Valor cobrado ($)</label><input id="eb-valor" type="number" min="0.01" step="0.01" value="${s.valorInformado ?? ''}">
+          <div class="dica num" id="eb-calc">${esc(textoCalculo(extraDe(cfg, m.servico ?? s.servico), s.valorInformado, s.quantidade))}</div></div>
         <div class="campo"><label for="eb-qtd">Quantidade</label><input id="eb-qtd" type="number" min="1" max="20" required value="${s.quantidade}"></div>
       </div>
       <label class="acoes"><input type="checkbox" id="eb-aprovar" checked> Aprovar após salvar</label>
@@ -1140,8 +1163,8 @@ function exportarCSV(coachId, mes) {
   const ajustes = f?.ajustes || [];
   const n = (v) => String(v).replace('.', ',');
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const L = [[`Controle de Sessões | ${c.nome} | ${mesLabel(mes)}`], [], ['Data', 'Cliente', 'Tipo', 'Serviço', 'Valor informado', 'Quantidade', 'Status', 'Observação', 'Comentário da revisão']];
-  sessoesDe(coachId, mes).forEach((s) => { const cl = mapa.get(s.clienteId); L.push([fmtDiaAno(s.data), cl?.nome || s.clienteNome, cl?.tipo || '', nomeServico(cfg, s.servico), s.valorInformado ? n(s.valorInformado) : '', s.quantidade, STATUS[s.status], s.obs || '', s.comentario || '']); });
+  const L = [[`Controle de Sessões | ${c.nome} | ${mesLabel(mes)}`], [], ['Data', 'Cliente', 'Tipo', 'Serviço', 'Valor cobrado', 'Valor pago ao coach (unit.)', 'Quantidade', 'Status', 'Observação', 'Comentário da revisão']];
+  sessoesDe(coachId, mes).forEach((s) => { const cl = mapa.get(s.clienteId); L.push([fmtDiaAno(s.data), cl?.nome || s.clienteNome, cl?.tipo || '', nomeServico(cfg, s.servico), s.valorInformado ? n(s.valorInformado) : '', s.valorInformado ? n(valorPagoUnit(extraDe(cfg, s.servico), s.valorInformado)) : '', s.quantidade, STATUS[s.status], s.obs || '', s.comentario || '']); });
   L.push([], ['Resumo de valores' + (f?.status === 'fechado' ? ' (fechado)' : ' (aprovadas, mês aberto)')], ['Tipo', 'Valor unitário', 'Quantidade', 'Valor total']);
   r.linhas.forEach((l) => L.push([l.descricao, l.valorUnit == null ? 'variável' : n(l.valorUnit), l.quantidade, n(l.total)]));
   ajustes.forEach((a) => L.push(['Ajuste: ' + a.descricao, '', '', n(a.valor)]));
@@ -1171,6 +1194,18 @@ $app.addEventListener('submit', async (ev) => {
   if (btn?.disabled) return;
   if (btn) btn.disabled = true;
   try { await forms[f.dataset.form](f); } finally { const b = document.contains(btn) ? btn : null; if (b) b.disabled = false; }
+});
+$app.addEventListener('input', (ev) => {
+  const id = ev.target.id;
+  const par = { 'f-valor': ['f-calc', 'f-qtd', 'f-servico', () => cfgCoach(S.perfil)], 'f-qtd': ['f-calc', 'f-qtd', 'f-servico', () => cfgCoach(S.perfil)],
+    'eb-valor': ['eb-calc', 'eb-qtd', 'eb-servico', () => cfgCoach(usuario(S.sessoes.find((x) => x.id === S.modal?.id)?.coachId))],
+    'eb-qtd': ['eb-calc', 'eb-qtd', 'eb-servico', () => cfgCoach(usuario(S.sessoes.find((x) => x.id === S.modal?.id)?.coachId))] }[id];
+  if (!par) return;
+  const [alvo, qtdId, servId, cfgFn] = par;
+  const el = document.getElementById(alvo);
+  if (!el) return;
+  const valorId = alvo === 'f-calc' ? 'f-valor' : 'eb-valor';
+  el.textContent = textoCalculo(extraDe(cfgFn(), val(servId)), val(valorId), parseInt(val(qtdId), 10) || 1);
 });
 $app.addEventListener('change', async (ev) => {
   const el = ev.target;
