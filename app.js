@@ -25,7 +25,7 @@ const slug = (s) => norm(s).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').sl
 const toDate = (v) => (!v ? null : v.toDate ? v.toDate() : v instanceof Date ? v : new Date(v));
 const fmtDataHora = (v) => { const d = toDate(v); return d ? d.toLocaleDateString('pt-BR') : ''; };
 const titulo = (s) => String(s || '').trim().replace(/\s+/g, ' ');
-const PAPEIS = { admin: 'Administrador', revisora: 'Revisora (Bia)', financeiro: 'Financeiro', coach: 'Coach' };
+const PAPEIS = { admin: 'Administrador', revisora: 'Revisora (Bia)', financeiro: 'Financeiro', aprovador: 'Aprovação final', coach: 'Coach' };
 const STATUS = { pendente: 'Pendente', aprovada: 'Aprovada', recusada: 'Recusada' };
 
 function toast(msg, erro = false) {
@@ -64,7 +64,8 @@ function limparSubs() { Object.keys(subs).forEach((k) => { subs[k](); delete sub
 const staff = () => S.perfil && (S.perfil.papel === 'admin' || S.perfil.papel === 'revisora');
 const isAdmin = () => S.perfil?.papel === 'admin';
 const isFin = () => S.perfil?.papel === 'financeiro';
-const leitor = () => staff() || isFin();                 // vê todos os coaches
+const isAprov = () => S.perfil?.papel === 'aprovador';     // Ricardo: aprovação final, depois do financeiro
+const leitor = () => staff() || isFin() || isAprov();     // vê todos os coaches
 const editaValores = () => isAdmin() || isFin();
 const uid = () => S.auth?.uid;
 const usuario = (id) => (id === uid() ? { id, ...S.perfil } : S.usuarios.find((u) => u.id === id));
@@ -136,7 +137,7 @@ function iniciarDados() {
     sub('usuarios', B.db.watch('users', [], (l) => { S.usuarios = l; tentativasLeitura = 0; render(); }, erroLeitura));
     sub('clientes', B.db.watch('clientes', [], (l) => { S.clientes = l; render(); }, erroLeitura));
     sub('fech', B.db.watch('fechamentos', [], (l) => { S.fechamentos = l; render(); }, erroLeitura));
-    S.view ||= isFin() ? 'valores' : 'painel';
+    S.view ||= isAprov() ? 'aprovacao' : isFin() ? 'valores' : 'painel';
   } else {
     sub('clientes', B.db.watch('clientes', [['coachId', '==', uid()]], (l) => { S.clientes = l; render(); }, erroLeitura));
     sub('fech', B.db.watch('fechamentos', [['coachId', '==', uid()]], (l) => { S.fechamentos = l; render(); }, erroLeitura));
@@ -220,11 +221,13 @@ function telaSemPerfil() {
 }
 
 function topo() {
-  const itens = isFin()
+  const itens = isAprov()
+    ? [['aprovacao', 'Aprovação final'], ['tabela', 'Tabela de valores'], ['fechamentos', 'Fechamentos']]
+    : isFin()
     ? [['valores', 'Conferência de valores'], ['tabela', 'Tabela de valores'], ['fechamentos', 'Fechamentos']]
     : staff()
     ? [['painel', 'Painel'], ['conferencia', 'Conferência'], ['carteiras', 'Carteiras'], ['fechamentos', 'Fechamentos'],
-       ...(isAdmin() ? [['valores', 'Conferência de valores']] : []), ['tabela', 'Tabela de valores'],
+       ...(isAdmin() ? [['valores', 'Conferência de valores'], ['aprovacao', 'Aprovação final']] : []), ['tabela', 'Tabela de valores'],
        ...(isAdmin() ? [['usuarios', 'Usuários'], ['importar', 'Importar histórico']] : [])]
     : [['lancar', 'Minhas sessões'], ['carteira', 'Minha carteira'], ['historico', 'Meus fechamentos']];
   return `${DEMO ? '<div class="demo-faixa">Modo demonstração — dados fictícios. Preencha o firebase-config.js para usar de verdade.</div>' : ''}
@@ -247,7 +250,8 @@ function conteudo() {
   if (!leitor()) return v === 'carteira' ? vCarteiraCoach() : v === 'historico' ? vHistoricoCoach() : vLancar();
   if (v === 'tabela') return vTabela();
   if (v === 'fechamentos') return vFechamentos();
-  if (isFin() || (v === 'valores' && isAdmin())) return vValores();
+  if (isAprov() || (v === 'aprovacao' && isAdmin())) return vValores('aprovacao');
+  if (isFin() || (v === 'valores' && isAdmin())) return vValores('conferencia');
   if (v === 'conferencia') return vConferencia();
   if (v === 'carteiras') return vCarteiras();
   if (v === 'fechamentos') return vFechamentos();
@@ -323,8 +327,9 @@ function cardResumo(coachId, mes, painelBia) {
       ${f.subtotal != null && (f.ajustes || []).length ? `<div class="sub-total"><span>Subtotal</span><span class="num">${fmtUSD(f.subtotal)}</span></div>` : ''}
       <div class="total-grande"><span>Valor fechado</span><strong>${fmtUSD(f.total)}</strong></div>
       <p class="nota">${f.origem === 'planilha' ? 'Fechamento importado da planilha antiga.' : `Fechado em ${fmtDataHora(f.fechadoEm)}${f.fechadoPorNome ? ' por ' + esc(f.fechadoPorNome) : ''}.`}</p>
-      ${painelBia && f.conferencia ? `<div class="aviso ${f.conferencia.status === 'ok' ? 'fechado' : 'erro'}"><div><b>${f.conferencia.status === 'ok' ? 'Valores conferidos' : 'Divergência apontada'}</b> por ${esc(f.conferencia.porNome)}${f.conferencia.comentario ? ': ' + esc(f.conferencia.comentario) : ''}</div></div>` : painelBia ? '<p class="nota">Aguardando conferência dos valores pelo financeiro.</p>' : ''}
-      ${!painelBia && f.conferencia?.status === 'ok' ? '<p class="nota">Valores conferidos pelo financeiro.</p>' : ''}
+      ${painelBia && f.conferencia ? avisoEtapa('Valores conferidos', f.conferencia) : painelBia && f.origem !== 'planilha' ? '<p class="nota">Aguardando conferência dos valores pelo financeiro.</p>' : ''}
+      ${painelBia && f.aprovacao ? avisoEtapa('Aprovação final', f.aprovacao) : ''}
+      ${!painelBia && f.aprovacao?.status === 'ok' ? '<p class="nota"><b>Pagamento aprovado.</b></p>' : !painelBia && f.conferencia?.status === 'ok' ? '<p class="nota">Valores conferidos pelo financeiro.</p>' : ''}
       ${painelBia ? botoesFechamento(coachId, mes, true) : ''}</section>`;
   }
   const aprov = resumo(coachId, mes, ['aprovada']);
@@ -492,7 +497,7 @@ function formAjuste() {
 }
 function botoesFechamento(coachId, mes, estaFechado, nPend = 0) {
   if (estaFechado) {
-    return `<div class="acoes" style="margin-top:14px"><button class="btn" data-acao="csv" data-coach="${coachId}">Exportar CSV</button>
+    return `<div class="acoes" style="margin-top:14px"><button class="btn" data-acao="pdf" data-coach="${coachId}">Recibo em PDF</button><button class="btn" data-acao="csv" data-coach="${coachId}">Exportar CSV</button>
       ${isAdmin() ? `<button class="btn" data-acao="modal" data-tipo="reabrir">Reabrir mês</button>` : ''}</div>`;
   }
   return `<div class="acoes" style="margin-top:14px"><button class="btn pri" data-acao="modal" data-tipo="fechar">Fechar mês</button>
@@ -537,7 +542,7 @@ function vFechamentos() {
     const cels = cs.map((c) => {
       const f = fechamento(c.id, m);
       if (f?.status === 'fechado') { tot[c.id] += Math.round(f.total * 100); soma += Math.round(f.total * 100);
-        return `<td class="r"><button class="link num" data-acao="irConf" data-coach="${c.id}" data-mes="${m}">${fmtUSD(f.total)}</button>${f.origem === 'planilha' ? '<div class="nota">planilha</div>' : ''}${f.conferencia?.status === 'ok' ? '<div class="nota" style="color:var(--ok)">conferido</div>' : f.conferencia?.status === 'divergencia' ? '<div class="nota" style="color:var(--bad)">divergência</div>' : ''}</td>`; }
+        return `<td class="r"><button class="link num" data-acao="irConf" data-coach="${c.id}" data-mes="${m}">${fmtUSD(f.total)}</button>${f.origem === 'planilha' ? '<div class="nota">planilha</div>' : ''}${f.aprovacao?.status === 'ok' ? '<div class="nota" style="color:var(--ok)">aprovado</div>' : f.aprovacao?.status === 'divergencia' ? '<div class="nota" style="color:var(--bad)">problema na aprovação</div>' : f.conferencia?.status === 'ok' ? '<div class="nota" style="color:var(--ok)">conferido</div>' : f.conferencia?.status === 'divergencia' ? '<div class="nota" style="color:var(--bad)">divergência</div>' : ''}</td>`; }
       if (m === S.mes && sessoesDe(c.id, m).length) return `<td class="r"><button class="link" data-acao="irConf" data-coach="${c.id}" data-mes="${m}">aberto</button></td>`;
       return '<td class="r nota">—</td>';
     }).join('');
@@ -619,11 +624,15 @@ function lerValores(u) {
 }
 
 // ============================================================ FINANCEIRO: tabela de valores e conferência
+// etapas depois do fechamento da Bia: conferência (financeiro) → aprovação final (Ricardo)
 const pillConf = (f) => (!f || f.status !== 'fechado') ? '<span class="pill p-aberto">Aguardando fechamento</span>'
   : f.origem === 'planilha' && !f.conferencia ? '<span class="pill p-fechado">Histórico (planilha)</span>'
-  : f.conferencia?.status === 'ok' ? '<span class="pill p-aprovada">Valores conferidos</span>'
+  : f.aprovacao?.status === 'ok' ? '<span class="pill p-aprovada">Pagamento aprovado</span>'
+  : f.aprovacao?.status === 'divergencia' ? '<span class="pill p-recusada">Problema na aprovação</span>'
+  : f.conferencia?.status === 'ok' ? '<span class="pill p-fechado">Conferido · aguardando aprovação</span>'
   : f.conferencia?.status === 'divergencia' ? '<span class="pill p-recusada">Divergência</span>'
   : '<span class="pill p-pendente">A conferir</span>';
+const avisoEtapa = (rotulo, x) => `<div class="aviso ${x.status === 'ok' ? 'fechado' : 'erro'}" style="margin-bottom:10px"><div><b>${rotulo}${x.status === 'ok' ? '' : ': problema apontado'}</b> por ${esc(x.porNome)} em ${fmtDataHora(x.em)}${x.comentario ? `<br>${esc(x.comentario)}` : ''}</div></div>`;
 
 function vTabela() {
   const cs = coaches().filter((c) => c.ativo !== false);
@@ -652,31 +661,37 @@ function refTabela(cfg, l) {
   return undefined;
 }
 
-function vValores() {
+function vValores(modo = 'conferencia') {
+  const aprov = modo === 'aprovacao';
   const cs = coaches().filter((c) => c.ativo !== false || fechamento(c.id, S.mes));
   if (!S.coachSel || !cs.some((c) => c.id === S.coachSel)) S.coachSel = cs[0]?.id || null;
   const linhasTab = cs.map((c) => {
     const f = fechamento(c.id, S.mes);
     const valor = f?.status === 'fechado' ? fmtUSD(f.total) : `<span class="nota">${fmtUSD(resumo(c.id, S.mes).total)} (parcial)</span>`;
     return `<tr ${c.id === S.coachSel ? 'style="background:var(--accent-soft)"' : ''}><td><b>${esc(c.nome)}</b></td><td>${pillMes(c.id, S.mes)}</td><td class="r">${valor}</td><td>${pillConf(f)}</td>
-      <td class="r"><button class="btn sm ${f?.status === 'fechado' && !f.conferencia ? 'pri' : ''}" data-acao="verValores" data-coach="${c.id}">Ver detalhes</button></td></tr>`;
+      <td class="r"><button class="btn sm ${f?.status === 'fechado' && (aprov ? f.conferencia?.status === 'ok' && !f.aprovacao : !f.conferencia) ? 'pri' : ''}" data-acao="verValores" data-coach="${c.id}">Ver detalhes</button></td></tr>`;
   }).join('');
   // fila: meses fechados pela Bia (no sistema) que ainda não foram conferidos, em qualquer mês
-  const fila = S.fechamentos.filter((f) => f.status === 'fechado' && f.origem !== 'planilha' && !f.conferencia)
+  const fila = S.fechamentos.filter((f) => f.status === 'fechado' && f.origem !== 'planilha'
+      && (aprov ? f.conferencia?.status === 'ok' && !f.aprovacao : !f.conferencia))
     .sort((a, b) => a.mes.localeCompare(b.mes) || (usuario(a.coachId)?.nome || '').localeCompare(usuario(b.coachId)?.nome || ''));
-  const divs = S.fechamentos.filter((f) => f.status === 'fechado' && f.conferencia?.status === 'divergencia');
+  const divs = S.fechamentos.filter((f) => f.status === 'fechado' && (aprov ? f.aprovacao?.status === 'divergencia' : f.conferencia?.status === 'divergencia'));
   const nHist = S.fechamentos.filter((f) => f.origem === 'planilha').length;
-  const filaHTML = `<section class="card"><div class="cab"><h2>Aguardando sua conferência</h2><span class="nota">${fila.length} mês(es)</span></div>
-    ${fila.length ? `<div class="tabwrap"><table><thead><tr><th>Coach</th><th>Mês</th><th class="r">Valor fechado</th><th>Fechado em</th><th></th></tr></thead><tbody>
-      ${fila.map((f) => `<tr><td><b>${esc(usuario(f.coachId)?.nome || '—')}</b></td><td>${mesLabel(f.mes)}</td><td class="r">${fmtUSD(f.total)}</td><td>${fmtDataHora(f.fechadoEm)}${f.fechadoPorNome ? ' · ' + esc(f.fechadoPorNome) : ''}</td>
-        <td class="r"><button class="btn sm pri" data-acao="irValores" data-coach="${f.coachId}" data-mes="${f.mes}">Conferir</button></td></tr>`).join('')}</tbody></table></div>`
-      : `<div class="vazio" style="padding:14px">Nenhum mês aguardando conferência. Os meses aparecem aqui assim que a Bia fecha.</div>`}
-    ${divs.length ? `<p class="nota">${divs.length} mês(es) com divergência apontada, aguardando correção: ${divs.map((f) => `<button class="link" data-acao="irValores" data-coach="${f.coachId}" data-mes="${f.mes}">${esc(usuario(f.coachId)?.nome || '')} · ${mesLabel(f.mes)}</button>`).join(', ')}.</p>` : ''}
+  const filaHTML = `<section class="card"><div class="cab"><h2>${aprov ? 'Aguardando sua aprovação' : 'Aguardando sua conferência'}</h2><span class="nota">${fila.length} mês(es)</span></div>
+    ${fila.length ? `<div class="tabwrap"><table><thead><tr><th>Coach</th><th>Mês</th><th class="r">Valor fechado</th><th>${aprov ? 'Conferido em' : 'Fechado em'}</th><th></th></tr></thead><tbody>
+      ${fila.map((f) => `<tr><td><b>${esc(usuario(f.coachId)?.nome || '—')}</b></td><td>${mesLabel(f.mes)}</td><td class="r">${fmtUSD(f.total)}</td>
+        <td>${aprov ? `${fmtDataHora(f.conferencia.em)} · ${esc(f.conferencia.porNome || '')}` : `${fmtDataHora(f.fechadoEm)}${f.fechadoPorNome ? ' · ' + esc(f.fechadoPorNome) : ''}`}</td>
+        <td class="r"><button class="btn sm pri" data-acao="irValores" data-coach="${f.coachId}" data-mes="${f.mes}">${aprov ? 'Revisar e aprovar' : 'Conferir'}</button></td></tr>`).join('')}</tbody></table></div>`
+      : `<div class="vazio" style="padding:14px">${aprov ? 'Nenhum mês aguardando aprovação. Os meses aparecem aqui assim que o financeiro marca os valores como conferidos.' : 'Nenhum mês aguardando conferência. Os meses aparecem aqui assim que a Bia fecha.'}</div>`}
+    ${divs.length ? `<p class="nota">${divs.length} mês(es) com ${aprov ? 'problema apontado na aprovação' : 'divergência apontada'}, aguardando correção: ${divs.map((f) => `<button class="link" data-acao="irValores" data-coach="${f.coachId}" data-mes="${f.mes}">${esc(usuario(f.coachId)?.nome || '')} · ${mesLabel(f.mes)}</button>`).join(', ')}.</p>` : ''}
     ${nHist ? `<p class="nota">O histórico importado das planilhas (${nHist} meses fechados) está na aba <button class="link" data-acao="ir" data-view="fechamentos">Fechamentos</button> ou navegando pelos meses com as setas.</p>` : ''}
   </section>`;
-  return `<div class="cab"><div><h1>Conferência de valores</h1><p>Confira o valor de cada coach depois que a Bia fechar o mês. Durante o mês, os valores aparecem como parciais (só sessões já aprovadas).</p></div>${seletorMes()}</div>
+  const titulo = aprov
+    ? '<h1>Aprovação final</h1><p>Revise o que o financeiro conferiu e dê a aprovação final do pagamento de cada coach.</p>'
+    : '<h1>Conferência de valores</h1><p>Confira o valor de cada coach depois que a Bia fechar o mês. Durante o mês, os valores aparecem como parciais (só sessões já aprovadas).</p>';
+  return `<div class="cab"><div>${titulo}</div>${seletorMes()}</div>
     ${filaHTML}
-    <section class="card"><div class="cab"><h2>Coaches em ${mesLabel(S.mes)}</h2></div>${cs.length ? `<div class="tabwrap"><table><thead><tr><th>Coach</th><th>Mês</th><th class="r">Valor</th><th>Conferência</th><th></th></tr></thead><tbody>${linhasTab}</tbody></table></div>` : '<div class="vazio">Nenhum coach cadastrado.</div>'}</section>
+    <section class="card"><div class="cab"><h2>Coaches em ${mesLabel(S.mes)}</h2></div>${cs.length ? `<div class="tabwrap"><table><thead><tr><th>Coach</th><th>Mês</th><th class="r">Valor</th><th>Situação</th><th></th></tr></thead><tbody>${linhasTab}</tbody></table></div>` : '<div class="vazio">Nenhum coach cadastrado.</div>'}</section>
     ${S.coachSel ? detalheValores(S.coachSel) : ''}`;
 }
 
@@ -716,14 +731,20 @@ function detalheValores(coachId) {
       ${fech && f.origem !== 'planilha' ? `<p class="nota">Recalculando as sessões aprovadas com a tabela atual: <b class="num">${fmtUSD(recalc.total)}</b>${diffTotal ? ` (diferença de <b class="num">${fmtUSD(diffTotal)}</b> em relação ao fechado)` : ' (igual ao fechado)'}.${divergencias ? ` ${divergencias} valor(es) unitário(s) diferente(s) da tabela atual.` : ''}</p>` : ''}
       ${cfgEpoca && f.config ? `<p class="nota">Regra usada no fechamento: A ${fmtUSD(cfgEpoca.valorA)} · B ${fmtUSD(cfgEpoca.valorB)} · bônus ${fmtUSD(cfgEpoca.bonusAtivo)} / ${fmtUSD(cfgEpoca.bonusRecorrencia)}.</p>` : ''}
     </section>
-    <section class="card"><h2>Conferência</h2>
-      ${conf ? `<div class="aviso ${conf.status === 'ok' ? 'fechado' : 'erro'}" style="margin-bottom:12px"><div><b>${conf.status === 'ok' ? 'Conferido' : 'Divergência'}</b> por ${esc(conf.porNome)} em ${fmtDataHora(conf.em)}${conf.comentario ? `<br>${esc(conf.comentario)}` : ''}</div></div>` : ''}
+    <section class="card"><h2>Conferência e aprovação</h2>
+      ${fech && f.fechadoPorNome ? `<p class="nota" style="margin:0 0 8px">Fechado por ${esc(f.fechadoPorNome)}${f.fechadoEm ? ' em ' + fmtDataHora(f.fechadoEm) : ''}.</p>` : ''}
+      ${conf ? avisoEtapa('Valores conferidos', conf) : fech && f.origem !== 'planilha' ? '<p class="nota">Aguardando a conferência do financeiro.</p>' : ''}
+      ${f?.aprovacao ? avisoEtapa('Aprovação final', f.aprovacao) : conf?.status === 'ok' ? '<p class="nota">Aguardando a aprovação final.</p>' : ''}
       ${livres.length ? `<h3 style="margin:4px 0 6px">Serviços com valor livre</h3><table class="resumo"><tbody>${livres.map((s) => { const ex = extraDe(cfg, s.servico); const v = Number(s.valorInformado); const pct = percentualDe(ex);
         return `<tr><td>${fmtDia(s.data)} · ${esc(mapa.get(s.clienteId)?.nome || s.clienteNome)}<div class="nota num">${esc(nomeServico(cfg, s.servico))}${s.quantidade > 1 ? ` · ${s.quantidade}×` : ''}${v > 0 && pct < 100 ? ` · cobrado ${fmtUSD(v * s.quantidade)}, ${pct}% ao coach` : ''}</div></td>
         <td class="r">${v > 0 ? fmtUSD(Math.round(valorPagoUnit(ex, v) * 100) * s.quantidade / 100) : '<span style="color:var(--bad)">sem valor</span>'}</td></tr>`; }).join('')}</tbody></table>` : ''}
-      ${fech && (isFin() || isAdmin()) ? `<div class="acoes" style="margin-top:14px"><button class="btn pri" data-acao="conferirValores" data-coach="${coachId}">Valores conferidos</button>
-        <button class="btn bad" data-acao="modal" data-tipo="divergencia" data-id="${coachId}">Apontar divergência</button>
-        <button class="btn" data-acao="csv" data-coach="${coachId}">Exportar CSV</button></div>` : ''}
+      ${fech && (isFin() || (isAdmin() && S.view === 'valores')) && !f.aprovacao ? `<div class="acoes" style="margin-top:14px"><button class="btn pri" data-acao="conferirValores" data-coach="${coachId}">Valores conferidos</button>
+        <button class="btn bad" data-acao="modal" data-tipo="divergencia" data-id="${coachId}">Apontar divergência</button></div>` : ''}
+      ${fech && (isAprov() || (isAdmin() && S.view === 'aprovacao')) && conf?.status === 'ok' && !f.aprovacao ? `<div class="acoes" style="margin-top:14px"><button class="btn pri" data-acao="modal" data-tipo="aprovar" data-id="${coachId}">Aprovar pagamento</button>
+        <button class="btn bad" data-acao="modal" data-tipo="problemaAprov" data-id="${coachId}">Apontar problema</button></div>` : ''}
+      ${fech && isFin() && f.aprovacao ? '<p class="nota">Este mês já tem aprovação final. Para mudar a conferência, o administrador precisa reabrir o mês.</p>' : ''}
+      ${fech ? `<div class="acoes" style="margin-top:10px"><button class="btn" data-acao="pdf" data-coach="${coachId}">Recibo em PDF</button>
+        <button class="btn" data-acao="csv" data-coach="${coachId}">Exportar CSV (Excel)</button></div>` : ''}
       <p class="nota">Tabela atual: ${regraTexto(cfg)}</p>
     </section></div>`;
 }
@@ -790,7 +811,7 @@ function modal() {
         <div class="campo largo"><label for="nu-nome">Nome</label><input id="nu-nome" required></div>
         <div class="campo largo"><label for="nu-email">E-mail</label><input id="nu-email" type="email" required></div>
         <div class="campo"><label for="nu-senha">Senha provisória</label><input id="nu-senha" required minlength="6" value="${Math.random().toString(36).slice(2, 10)}"></div>
-        <div class="campo"><label for="nu-papel">Perfil</label><select id="nu-papel"><option value="coach">Coach</option><option value="revisora">Revisora (Bia)</option><option value="financeiro">Financeiro (Alexandre)</option><option value="admin">Administrador</option></select></div>
+        <div class="campo"><label for="nu-papel">Perfil</label><select id="nu-papel"><option value="coach">Coach</option><option value="revisora">Revisora (Bia)</option><option value="financeiro">Financeiro (Alexandre)</option><option value="aprovador">Aprovação final (Ricardo)</option><option value="admin">Administrador</option></select></div>
       </div>
       <p class="nota">Anote a senha provisória e envie para a pessoa. Ela pode trocar depois em "Senha", no topo. Os valores do coach começam com o padrão ($${CONFIG_PADRAO.valorA} / $${CONFIG_PADRAO.valorB}) e podem ser ajustados em Editar.</p>
       <div class="acoes"><button class="btn pri" type="submit">Criar usuário</button><button class="btn" type="button" data-acao="fecharModal">Cancelar</button></div></form>`;
@@ -816,6 +837,18 @@ function modal() {
       <p>${esc(u?.nome)} · ${mesLabel(S.mes)}. A Bia e o administrador veem o comentário. Para corrigir, o administrador reabre o mês.</p>
       <div class="campo"><label for="dv-txt">O que está diferente</label><textarea id="dv-txt" required maxlength="800" placeholder="Ex.: sessão Tipo B deveria ser $95 a partir de setembro"></textarea></div>
       <div class="acoes"><button class="btn pri" type="submit">Registrar divergência</button><button class="btn" type="button" data-acao="fecharModal">Cancelar</button></div></form>`;
+  } else if (m.tipo === 'aprovar') {
+    const u = usuario(m.id), f = fechamento(m.id, S.mes);
+    corpo = `<h2>Aprovar pagamento</h2>
+      <p>${esc(u?.nome)} · ${mesLabel(S.mes)} · <b class="num">${fmtUSD(f?.total)}</b></p>
+      <p>Conferido por ${esc(f?.conferencia?.porNome || '')} em ${fmtDataHora(f?.conferencia?.em)}. Ao aprovar, sua aprovação fica registrada com seu nome e a data, como uma assinatura, e aparece no recibo em PDF.</p>
+      <div class="acoes"><button class="btn pri" data-acao="confirmarAprovacao">Aprovar pagamento</button><button class="btn" data-acao="fecharModal">Cancelar</button></div>`;
+  } else if (m.tipo === 'problemaAprov') {
+    const u = usuario(m.id);
+    corpo = `<form data-form="problemaAprov" style="display:grid;gap:14px"><h2>Apontar problema</h2>
+      <p>${esc(u?.nome)} · ${mesLabel(S.mes)}. O financeiro, a Bia e o administrador veem o comentário. Para corrigir, o administrador reabre o mês.</p>
+      <div class="campo"><label for="pa-txt">O que está errado</label><textarea id="pa-txt" required maxlength="800"></textarea></div>
+      <div class="acoes"><button class="btn pri" type="submit">Registrar problema</button><button class="btn" type="button" data-acao="fecharModal">Cancelar</button></div></form>`;
   } else if (m.tipo === 'credenciais') {
     const txt = `Acesso ao ${NOME_SISTEMA}\nEndereço: ${location.origin}${location.pathname}\nLogin: ${m.email}\nSenha provisória: ${m.senha}`;
     corpo = `<h2>${esc(m.nome)} cadastrado(a)</h2><p>Envie estes dados para a pessoa. A senha provisória não aparece de novo; se perder, use "Enviar e-mail de nova senha".</p>
@@ -846,7 +879,7 @@ const acoes = {
   mes(d) { S.mes = somaMes(S.mes, +d.d); S.edit = null; S.sel.clear(); assinarSessoes(); render(); },
   abrirMes(d) { S.mes = d.mes; S.view = 'lancar'; assinarSessoes(); render(); },
   conferir(d) { S.coachSel = d.coach; S.view = 'conferencia'; S.filtro = 'todas'; S.sel.clear(); render(); window.scrollTo(0, 0); },
-  irConf(d) { S.coachSel = d.coach; S.mes = d.mes; S.view = isFin() ? 'valores' : 'conferencia'; S.filtro = 'todas'; assinarSessoes(); render(); window.scrollTo(0, 0); },
+  irConf(d) { S.coachSel = d.coach; S.mes = d.mes; S.view = isAprov() ? 'aprovacao' : isFin() ? 'valores' : 'conferencia'; S.filtro = 'todas'; assinarSessoes(); render(); window.scrollTo(0, 0); },
   editar(d) { S.edit = d.id; S.novoCliente = false; S.servicoSel = S.sessoes.find((x) => x.id === d.id)?.servico || 'sessao'; render(true); window.scrollTo(0, 0); },
   cancelarEdit() { S.edit = null; S.novoCliente = false; S.servicoSel = 'sessao'; render(true); },
   excluir(d) { S.modal = { tipo: 'excluir', id: d.id }; render(); },
@@ -889,13 +922,20 @@ const acoes = {
   async confirmarReabrir() {
     const f = fechamento(S.coachSel, S.mes);
     S.modal = null; render();
-    const reg = { acao: 'reaberto', totalAnterior: f.total, conferencia: f.conferencia || null, por: S.perfil.nome, em: new Date().toISOString() };
-    await tentar(() => B.db.update('fechamentos', f.id, { status: 'aberto', conferencia: null, historico: [...(f.historico || []), reg], reabertoPorNome: S.perfil.nome, reabertoEm: B.db.agora() }), 'Mês reaberto.');
+    const reg = { acao: 'reaberto', totalAnterior: f.total, conferencia: f.conferencia || null, aprovacao: f.aprovacao || null, por: S.perfil.nome, em: new Date().toISOString() };
+    await tentar(() => B.db.update('fechamentos', f.id, { status: 'aberto', conferencia: null, aprovacao: null, historico: [...(f.historico || []), reg], reabertoPorNome: S.perfil.nome, reabertoEm: B.db.agora() }), 'Mês reaberto.');
   },
   async resetSenha(d) { await tentar(() => B.auth.reset(d.email), `E-mail de nova senha enviado para ${d.email}.`); },
   csv(d) { exportarCSV(d.coach, S.mes); },
   verValores(d) { S.coachSel = d.coach; render(); },
-  irValores(d) { S.coachSel = d.coach; S.mes = d.mes; S.view = 'valores'; assinarSessoes(); render(); window.scrollTo(0, 0); },
+  irValores(d) { S.coachSel = d.coach; S.mes = d.mes; S.view = isAprov() || S.view === 'aprovacao' ? 'aprovacao' : 'valores'; assinarSessoes(); render(); window.scrollTo(0, 0); },
+  async confirmarAprovacao() {
+    const coachId = S.modal.id;
+    S.modal = null; render();
+    await tentar(() => B.db.update('fechamentos', `${coachId}_${S.mes}`, { aprovacao: { status: 'ok', comentario: '', porNome: S.perfil.nome, por: uid(), em: new Date().toISOString() } }),
+      'Pagamento aprovado.');
+  },
+  async pdf(d) { await tentar(() => exportarPDF(d.coach, S.mes)); },
   async conferirValores(d) {
     await tentar(() => B.db.update('fechamentos', `${d.coach}_${S.mes}`, { conferencia: { status: 'ok', comentario: '', porNome: S.perfil.nome, por: uid(), em: new Date().toISOString() } }),
       'Valores marcados como conferidos.');
@@ -1082,6 +1122,12 @@ const forms = {
     S.modal = null; render();
     await tentar(() => B.db.update('users', u.id, { config, valoresAlteradosEm: B.db.agora(), valoresAlteradosPorNome: S.perfil.nome }), `Valores de ${u.nome} atualizados.`);
   },
+  async problemaAprov() {
+    const coachId = S.modal.id, txt = val('pa-txt');
+    S.modal = null; render();
+    await tentar(() => B.db.update('fechamentos', `${coachId}_${S.mes}`, { aprovacao: { status: 'divergencia', comentario: txt, porNome: S.perfil.nome, por: uid(), em: new Date().toISOString() } }),
+      'Problema registrado.');
+  },
   async divergencia() {
     const coachId = S.modal.id, txt = val('dv-txt');
     S.modal = null; render();
@@ -1157,28 +1203,167 @@ const forms = {
   },
 };
 
-// ============================================================ exportação CSV
-function exportarCSV(coachId, mes) {
+// ============================================================ exportação CSV (abre no Excel)
+// Linhas de cabeçalho com o mês de referência e quem fechou, conferiu e aprovou
+function etapasTexto(f) {
+  const t = (x) => fmtDataHora(x);
+  return [
+    ['Fechado pela revisão', f?.status === 'fechado' ? `${f.fechadoPorNome || ''}${f.fechadoEm ? ' em ' + t(f.fechadoEm) : ''}` : 'Mês ainda aberto'],
+    ['Valores conferidos', f?.conferencia ? `${f.conferencia.status === 'ok' ? '' : 'PROBLEMA APONTADO - '}${f.conferencia.porNome} em ${t(f.conferencia.em)}` : 'Pendente'],
+    ['Aprovação final', f?.aprovacao ? `${f.aprovacao.status === 'ok' ? '' : 'PROBLEMA APONTADO - '}${f.aprovacao.porNome} em ${t(f.aprovacao.em)}` : 'Pendente'],
+  ];
+}
+function dadosExportacao(coachId, mes) {
   const c = usuario(coachId);
   const cfg = cfgCoach(c);
   const mapa = mapaClientes(coachId);
   const f = fechamento(coachId, mes);
-  const r = f?.status === 'fechado' ? { linhas: f.linhas, total: f.total } : resumo(coachId, mes);
-  const ajustes = f?.ajustes || [];
+  const r = f?.status === 'fechado' ? { linhas: f.linhas || [], total: f.total } : resumo(coachId, mes);
+  return { c, cfg, mapa, f, r, ajustes: f?.ajustes || [], sessoes: sessoesDe(coachId, mes) };
+}
+function exportarCSV(coachId, mes) {
+  const { c, cfg, mapa, f, r, ajustes, sessoes } = dadosExportacao(coachId, mes);
   const n = (v) => String(v).replace('.', ',');
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const L = [[`Controle de Sessões | ${c.nome} | ${mesLabel(mes)}`], [], ['Data', 'Cliente', 'Tipo', 'Serviço', 'Valor cobrado', 'Valor pago ao coach (unit.)', 'Quantidade', 'Status', 'Observação', 'Comentário da revisão']];
-  sessoesDe(coachId, mes).forEach((s) => { const cl = mapa.get(s.clienteId); L.push([fmtDiaAno(s.data), cl?.nome || s.clienteNome, cl?.tipo || '', nomeServico(cfg, s.servico), s.valorInformado ? n(s.valorInformado) : '', s.valorInformado ? n(valorPagoUnit(extraDe(cfg, s.servico), s.valorInformado)) : '', s.quantidade, STATUS[s.status], s.obs || '', s.comentario || '']); });
-  L.push([], ['Resumo de valores' + (f?.status === 'fechado' ? ' (fechado)' : ' (aprovadas, mês aberto)')], ['Tipo', 'Valor unitário', 'Quantidade', 'Valor total']);
+  const L = [[`Controle de Sessões | ${c.nome} | ${mesLabel(mes)}`],
+    ['Coach', c.nome], ['Mês de referência', mesLabel(mes)], ...etapasTexto(f), ['Exportado em', new Date().toLocaleString('pt-BR')], [],
+    ['Mês', 'Data', 'Cliente', 'Tipo', 'Serviço', 'Valor cobrado', 'Valor pago ao coach (unit.)', 'Quantidade', 'Status', 'Observação', 'Comentário da revisão']];
+  sessoes.forEach((s) => { const cl = mapa.get(s.clienteId); L.push([mesLabel(mes), fmtDiaAno(s.data), cl?.nome || s.clienteNome, cl?.tipo || '', nomeServico(cfg, s.servico), s.valorInformado ? n(s.valorInformado) : '', s.valorInformado ? n(valorPagoUnit(extraDe(cfg, s.servico), s.valorInformado)) : '', s.quantidade, STATUS[s.status], s.obs || '', s.comentario || '']); });
+  L.push([], [`Resumo de valores - ${mesLabel(mes)}` + (f?.status === 'fechado' ? ' (fechado)' : ' (aprovadas, mês aberto)')], ['Tipo', 'Valor unitário', 'Quantidade', 'Valor total']);
   r.linhas.forEach((l) => L.push([l.descricao, l.valorUnit == null ? 'variável' : n(l.valorUnit), l.quantidade, n(l.total)]));
   ajustes.forEach((a) => L.push(['Ajuste: ' + a.descricao, '', '', n(a.valor)]));
   L.push(['Total a receber', '', '', n(r.total)]);
   const csv = '﻿' + L.map((row) => row.map(q).join(';')).join('\r\n');
+  baixar(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `sessoes_${slug(c.nome)}_${mes}.csv`);
+}
+function baixar(blob, nome) {
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-  a.download = `sessoes_${slug(c.nome)}_${mes}.csv`;
+  a.href = URL.createObjectURL(blob);
+  a.download = nome;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+// ============================================================ recibo em PDF
+// Bibliotecas jsPDF + AutoTable ficam na pasta vendor/ do próprio site (carregadas só quando usadas)
+let _jspdf = null;
+function carregarScript(src) {
+  return new Promise((ok, erro) => {
+    const el = document.createElement('script');
+    el.src = src; el.onload = ok;
+    el.onerror = () => erro(new Error('Não foi possível carregar o gerador de PDF. Verifique se a pasta vendor foi enviada ao site.'));
+    document.head.appendChild(el);
+  });
+}
+function carregarJsPDF() {
+  if (!_jspdf) {
+    _jspdf = (async () => {
+      if (!window.jspdf) await carregarScript('vendor/jspdf.umd.min.js');
+      if (!window.jspdf?.jsPDF?.API?.autoTable) await carregarScript('vendor/jspdf.plugin.autotable.min.js');
+      return window.jspdf.jsPDF;
+    })().catch((e) => { _jspdf = null; throw e; });
+  }
+  return _jspdf;
+}
+// As fontes padrão do PDF só têm caracteres Latin-1: troca travessões e aspas curvas
+const pdfTxt = (t) => String(t ?? '').replace(/[–—]/g, '-').replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/…/g, '...');
+
+async function exportarPDF(coachId, mes) {
+  const { c, cfg, mapa, f, r, ajustes, sessoes } = dadosExportacao(coachId, mes);
+  if (f?.status !== 'fechado') throw new Error('O recibo só pode ser gerado depois que o mês for fechado.');
+  const jsPDF = await carregarJsPDF();
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const W = 210, M = 16;
+  const verde = [14, 107, 91], cinza = [91, 106, 102], tinta = [21, 32, 30];
+  const aprovado = f.aprovacao?.status === 'ok';
+
+  // faixa do topo
+  doc.setFillColor(...verde); doc.rect(0, 0, W, 30, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(17); doc.text('RECIBO DE PAGAMENTO', M, 14);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.text(pdfTxt(`${NOME_SISTEMA} - sessões de coaching`), M, 21);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.text('MÊS DE REFERÊNCIA', W - M, 12, { align: 'right' });
+  doc.setFontSize(15); doc.text(pdfTxt(mesLabel(mes)), W - M, 20, { align: 'right' });
+
+  // coach e valor
+  let y = 42;
+  doc.setTextColor(...cinza); doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.text('COACH', M, y);
+  doc.text('VALOR TOTAL', W - M, y, { align: 'right' });
+  doc.setTextColor(...tinta); doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+  doc.text(pdfTxt(c.nome), M, y + 7);
+  doc.setFontSize(18); doc.text(fmtUSD(r.total), W - M, y + 8, { align: 'right' });
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...cinza);
+  if (c.email) doc.text(pdfTxt(c.email), M, y + 12.5);
+  if (!aprovado) {
+    doc.setTextColor(179, 38, 30); doc.setFont('helvetica', 'bold');
+    doc.text(f.aprovacao ? 'ATENÇÃO: problema apontado na aprovação final' : 'ATENÇÃO: pagamento ainda sem aprovação final', W - M, y + 14, { align: 'right' });
+  }
+  y += 20;
+
+  // resumo de valores
+  const corpo = r.linhas.map((l) => [pdfTxt(l.descricao), String(l.quantidade),
+    l.valorUnit == null ? (l.livre && l.percentual < 100 ? `${l.percentual}% de ${fmtUSD(l.cobrado)}` : 'variável') : fmtUSD(l.valorUnit), fmtUSD(l.total)]);
+  ajustes.forEach((a) => corpo.push([pdfTxt('Ajuste: ' + a.descricao), '', '', fmtUSD(a.valor)]));
+  doc.autoTable({
+    startY: y, margin: { left: M, right: M }, theme: 'grid',
+    head: [['Resumo de valores', 'Qtd', 'Valor unit.', 'Total']], body: corpo,
+    foot: [['Total a receber', '', '', fmtUSD(r.total)]],
+    styles: { font: 'helvetica', fontSize: 9, cellPadding: 2.2, textColor: tinta, lineColor: [219, 226, 223], lineWidth: 0.2 },
+    headStyles: { fillColor: [226, 241, 237], textColor: verde, fontStyle: 'bold' },
+    footStyles: { fillColor: [243, 245, 243], textColor: tinta, fontStyle: 'bold', fontSize: 10 },
+    columnStyles: { 1: { halign: 'right', cellWidth: 16 }, 2: { halign: 'right', cellWidth: 34 }, 3: { halign: 'right', cellWidth: 28 } },
+    didParseCell: (h) => { if (h.section !== 'body' && h.column.index > 0) h.cell.styles.halign = 'right'; },
+  });
+  y = doc.lastAutoTable.finalY + 7;
+
+  // sessões do mês (aprovadas)
+  const aprovadas = sessoes.filter((s) => s.status === 'aprovada');
+  doc.autoTable({
+    startY: y, margin: { left: M, right: M }, theme: 'striped',
+    head: [['Data', 'Cliente', 'Tipo', 'Serviço', 'Qtd']],
+    body: aprovadas.map((s) => {
+      const cl = mapa.get(s.clienteId), ex = extraDe(cfg, s.servico);
+      let serv = nomeServico(cfg, s.servico);
+      if (ex?.livre && Number(s.valorInformado) > 0) serv += ` (cobrado ${fmtUSD(s.valorInformado)}; pago ${fmtUSD(valorPagoUnit(ex, s.valorInformado))})`;
+      return [fmtDiaAno(s.data), pdfTxt(cl?.nome || s.clienteNome), Number(cl?.valorSessao) > 0 ? 'Especial' : (cl?.tipo || ''), pdfTxt(serv), String(s.quantidade)];
+    }),
+    styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 1.8, textColor: tinta },
+    headStyles: { fillColor: verde, textColor: 255 },
+    columnStyles: { 0: { cellWidth: 22 }, 2: { cellWidth: 16 }, 4: { halign: 'right', cellWidth: 12 } },
+    didParseCell: (h) => { if (h.section === 'head' && h.column.index === 4) h.cell.styles.halign = 'right'; },
+  });
+  y = doc.lastAutoTable.finalY + 8;
+
+  // trilha de conferência e aprovação
+  if (y > 230) { doc.addPage(); y = 20; }
+  doc.autoTable({
+    startY: y, margin: { left: M, right: M }, theme: 'plain',
+    head: [['Etapa', 'Responsável e data']],
+    body: etapasTexto(f).map(([a, b]) => [pdfTxt(a), pdfTxt(b)]),
+    styles: { font: 'helvetica', fontSize: 9, cellPadding: 1.8, textColor: tinta },
+    headStyles: { textColor: verde, fontStyle: 'bold' }, columnStyles: { 0: { cellWidth: 48, fontStyle: 'bold' } },
+  });
+  y = doc.lastAutoTable.finalY + 10;
+
+  // declaração e assinatura
+  if (y > 245) { doc.addPage(); y = 24; }
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...tinta);
+  const decl = doc.splitTextToSize(pdfTxt(`Declaro ter recebido o valor de ${fmtUSD(r.total)} referente às sessões de coaching realizadas em ${mesLabel(mes)}, conforme o resumo acima.`), W - 2 * M);
+  doc.text(decl, M, y);
+  y += decl.length * 5 + 16;
+  doc.setDrawColor(...cinza); doc.line(M, y, M + 80, y); doc.line(W - M - 60, y, W - M, y);
+  doc.setFontSize(8.5); doc.setTextColor(...cinza);
+  doc.text(pdfTxt(`${c.nome} (coach)`), M, y + 4.5); doc.text('Data', W - M - 60, y + 4.5);
+
+  // rodapé em todas as páginas
+  const total = doc.getNumberOfPages();
+  for (let i = 1; i <= total; i++) {
+    doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(...cinza);
+    doc.text(pdfTxt(`Emitido em ${new Date().toLocaleString('pt-BR')} por ${S.perfil.nome} - ${NOME_SISTEMA}`), M, 290);
+    doc.text(`${i} / ${total}`, W - M, 290, { align: 'right' });
+  }
+  baixar(doc.output('blob'), `recibo_${slug(c.nome)}_${mes}.pdf`);
+  toast('Recibo gerado.');
 }
 
 // ============================================================ eventos (delegação)

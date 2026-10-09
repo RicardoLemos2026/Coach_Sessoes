@@ -25,6 +25,7 @@ export async function criarBackend() {
     conta('admin@demo.com', 'u_admin', { nome: 'Administrador (demo)', papel: 'admin' });
     conta('bia@demo.com', 'u_bia', { nome: 'Bia (demo)', papel: 'revisora' });
     conta('alexandre@demo.com', 'u_alex', { nome: 'Alexandre (demo)', papel: 'financeiro' });
+    conta('ricardo@demo.com', 'u_ricardo', { nome: 'Ricardo (demo)', papel: 'aprovador' });
     conta('ana@demo.com', 'u_ana', { nome: 'Coach Ana (demo)', papel: 'coach',
       config: { valorA: 80, valorB: 90, limiteA: 10, bonusRecorrencia: 10, minSessoesBonus: 2, bonusAtivo: 10, extras: [] } });
     conta('bruno@demo.com', 'u_bruno', { nome: 'Coach Bruno (demo)', papel: 'coach',
@@ -80,7 +81,7 @@ export async function criarBackend() {
   return {
     modo: 'demo',
     contasDemo: [
-      ['admin@demo.com', 'Administrador'], ['bia@demo.com', 'Bia (revisora)'], ['alexandre@demo.com', 'Alexandre (financeiro)'],
+      ['admin@demo.com', 'Administrador'], ['bia@demo.com', 'Bia (revisora)'], ['alexandre@demo.com', 'Alexandre (financeiro)'], ['ricardo@demo.com', 'Ricardo (aprovação final)'],
       ['ana@demo.com', 'Coach Ana'], ['bruno@demo.com', 'Coach Bruno'],
     ],
     auth: {
@@ -118,6 +119,8 @@ export async function criarBackend() {
       novoId: () => novoId(),
       async update(col, id, patch) {
         if (!assegura(col)[id]) throw Object.assign(new Error('Documento não existe'), { code: 'not-found' });
+        if (col === 'sessoes' && 'quantidade' in patch && !(Number.isInteger(patch.quantidade) && patch.quantidade >= 1 && patch.quantidade <= 20))
+          throw Object.assign(new Error('Quantidade inválida'), { code: 'permission-denied' });
         Object.assign(assegura(col)[id], clone(patch)); notificar();
       },
       async del(col, id) { delete assegura(col)[id]; notificar(); },
