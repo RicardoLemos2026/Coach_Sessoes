@@ -758,7 +758,8 @@ function vContratos() {
       <td class="r">${fmtUSD(c.valorSessao)}${Number(c.valorContrato) > 0 ? `<div class="nota num">${fmtUSD(c.valorContrato)} × ${String(c.percentualCoach).replace('.', ',')}% ÷ ${tot}</div>` : ''}${c.valorUltimaSessao != null && Math.round(c.valorUltimaSessao * 100) !== Math.round(c.valorSessao * 100) ? `<div class="nota num">última: ${fmtUSD(c.valorUltimaSessao)}</div>` : ''}</td><td>${c.dataInicio ? fmtDiaAno(c.dataInicio) : '<span class="nota">—</span>'}</td>
       <td>${c.status !== 'ativo' ? '<span class="pill p-aberto">Encerrado</span>' : usadas >= tot ? '<span class="pill p-pendente">Completo</span>' : '<span class="pill p-aprovada">Ativo</span>'}</td>
       <td class="r" style="white-space:nowrap">${editaContratos() ? `<button class="ico" data-acao="modal" data-tipo="contrato" data-id="${c.id}">Editar</button>
-        <button class="ico" data-acao="statusContrato" data-id="${c.id}">${c.status === 'ativo' ? 'Encerrar' : 'Reativar'}</button>` : ''}</td></tr>`;
+        <button class="ico" data-acao="statusContrato" data-id="${c.id}">${c.status === 'ativo' ? 'Encerrar' : 'Reativar'}</button>` : ''}
+        ${isAdmin() && !S.sessoes.some((x) => x.contratoId === c.id) ? `<button class="ico bad" data-acao="modal" data-tipo="excluirContrato" data-id="${c.id}">Excluir</button>` : ''}</td></tr>`;
   }).join('');
   return `<div class="cab"><div><h1>Contratos</h1><p>Cada contrato define o cliente, o coach, o serviço, quantas sessões foram contratadas e quanto o coach recebe por sessão (valor do contrato × % do coach ÷ sessões). O sistema numera as sessões e bloqueia o lançamento quando o contrato acaba.</p></div>
       ${editaContratos() ? '<button class="btn pri" data-acao="modal" data-tipo="contrato">Novo contrato</button>' : ''}</div>
@@ -1036,6 +1037,12 @@ function modal() {
       ${abertasSem.length ? `<label class="acoes"><input type="checkbox" id="ct-vincular" checked> Vincular a este contrato as ${abertasSem.length} sessão(ões) deste cliente já lançadas em meses abertos (${[...new Set(abertasSem.map((x) => mesLabel(x.mes)))].join(', ')}). Elas passam a contar no contrato e a usar o valor dele.</label>` : ''}
       <p class="nota" style="margin:0">"Sessões já feitas antes do sistema" são as que aconteceram antes de usar o sistema (ou fora dele). As sessões lançadas no sistema e vinculadas ao contrato são contadas automaticamente: não some as duas coisas.${c ? ' Mudar o valor altera os meses abertos; meses fechados não mudam.' : ''}</p>
       <div class="acoes"><button class="btn pri" type="submit">${c ? 'Salvar' : 'Cadastrar contrato'}</button><button class="btn" type="button" data-acao="fecharModal">Cancelar</button></div></form>`;
+  } else if (m.tipo === 'excluirContrato') {
+    const c = contrato(m.id);
+    corpo = `<h2>Excluir contrato Nº ${esc(c?.numero || '')}</h2>
+      <p>${esc(c?.nome || '')} · ${esc(nomeCliente(c?.clienteId) || c?.clienteNome || '')} · ${esc(usuario(c?.coachId)?.nome || '')}</p>
+      <p>O contrato será apagado de vez. Só é possível excluir contrato sem nenhuma sessão lançada nele.</p>
+      <div class="acoes"><button class="btn bad" data-acao="confirmarExcluirContrato">Excluir</button><button class="btn" data-acao="fecharModal">Cancelar</button></div>`;
   } else if (m.tipo === 'aprovarTodos') {
     const fs = coaches().map((c) => fechamento(c.id, S.mes)).filter((f) => f?.status === 'fechado' && f.origem !== 'planilha' && f.conferencia?.status === 'ok' && !f.aprovacao);
     const tot = fs.reduce((a, f) => a + Math.round(Number(f.total || 0) * 100), 0) / 100;
@@ -1149,6 +1156,13 @@ const acoes = {
     await tentar(() => Promise.all(fs.map((f) => B.db.update('fechamentos', f.id, { aprovacao: ap }))), `${fs.length} pagamento(s) aprovado(s).`);
   },
   async pdf(d) { await tentar(() => exportarPDF(d.coach, S.mes)); },
+  async confirmarExcluirContrato() {
+    const c = contrato(S.modal.id);
+    S.modal = null; render();
+    if (!c) return;
+    if (S.sessoes.some((x) => x.contratoId === c.id)) return toast('Este contrato já tem sessões lançadas. Use Encerrar.', true);
+    await tentar(() => B.db.batch([{ op: 'delete', col: 'contratos', id: c.id }]), `Contrato Nº ${c.numero} excluído.`);
+  },
   async statusContrato(d) {
     const c = contrato(d.id);
     await tentar(() => B.db.update('contratos', c.id, { status: c.status === 'ativo' ? 'encerrado' : 'ativo', atualizadoEm: B.db.agora(), atualizadoPorNome: S.perfil.nome }),
