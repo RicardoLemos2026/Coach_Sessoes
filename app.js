@@ -1,5 +1,5 @@
 import { firebaseConfig, NOME_SISTEMA } from './firebase-config.js';
-import { calcularPagamento, cfgCoach, tipoSugerido, fmtUSD, CONFIG_PADRAO, percentualDe, valorPagoUnit } from './calculo.js';
+import { calcularPagamento, cfgCoach, tipoSugerido, fmtUSD, CONFIG_PADRAO, percentualDe, valorPagoUnit, valoresContrato } from './calculo.js';
 
 // ============================================================ backend
 // ?demo na URL força o modo demonstração mesmo com o Firebase configurado
@@ -53,8 +53,8 @@ async function tentar(fn, ok) {
 const S = {
   auth: null, perfil: undefined, sistemaExiste: null,
   view: null, mes: mesAtual(), coachSel: null,
-  usuarios: [], clientes: [], sessoes: [], fechamentos: [],
-  edit: null, novoCliente: false, servicoSel: 'sessao', sel: new Set(), filtro: 'todas',
+  usuarios: [], clientes: [], sessoes: [], fechamentos: [], contratos: [], sistema: null,
+  edit: null, novoCliente: false, servicoSel: 'sessao', clienteSel: '', contratoSel: '', sel: new Set(), filtro: 'todas',
   modal: null, importacao: null, pronto: {},
 };
 const subs = {};
@@ -92,26 +92,93 @@ function textoCalculo(ex, valor, qtd = 1) {
 }
 const servicoHTML = (cfg, s) => {
   const ex = extraDe(cfg, s.servico);
-  if (!ex?.livre) return esc(nomeServico(cfg, s.servico));
+  if (!ex?.livre || s.contratoId) return esc(nomeServico(cfg, s.servico));
   const v = Number(s.valorInformado);
   if (!(v > 0)) return esc(ex.nome) + '<div class="nota" style="color:var(--bad)">sem valor informado</div>';
   const pct = percentualDe(ex);
   return esc(ex.nome) + `<div class="nota num">Cobrado ${fmtUSD(v)}${s.quantidade > 1 ? ' cada' : ''}${pct < 100 ? ` · <b>pago ${fmtUSD(valorPagoUnit(ex, v))}</b> (${pct}%)` : ''}</div>`;
 };
 
+// ---------- contratos
+const exigeContrato = () => !!S.sistema?.exigirContrato;
+const contrato = (id) => S.contratos.find((c) => c.id === id);
+const nomeCliente = (id) => S.clientes.find((c) => c.id === id)?.nome || '';
+const servicoCt = (c) => c.servico || 'sessao';
+const contratosDoCliente = (clienteId, servico = null) => S.contratos.filter((c) => c.clienteId === clienteId && (!servico || servicoCt(c) === servico))
+  .sort((a, b) => (a.status === 'ativo' ? 0 : 1) - (b.status === 'ativo' ? 0 : 1) || String(a.numero).localeCompare(String(b.numero), 'pt', { numeric: true }));
+const mapaContratos = () => new Map(S.contratos.map((c) => [c.id, { ...c, clienteNome: nomeCliente(c.clienteId) || c.clienteNome }]));
+// uso de cada contrato: sessões feitas fora do sistema + sessões lançadas (exceto recusadas), em ordem de data
+let _uso = { s: null, c: null, v: null };
+function usoContratos() {
+  if (_uso.s === S.sessoes && _uso.c === S.contratos) return _uso.v;
+  const usadas = new Map(), faixa = new Map();
+  for (const c of S.contratos) usadas.set(c.id, Number(c.sessoesAnteriores) || 0);
+  const ss = S.sessoes.filter((x) => x.contratoId && x.status !== 'recusada' && usadas.has(x.contratoId))
+    .sort((a, b) => a.data.localeCompare(b.data) || (toDate(a.criadoEm)?.getTime() || 0) - (toDate(b.criadoEm)?.getTime() || 0));
+  for (const x of ss) {
+    const ini = usadas.get(x.contratoId) + 1, fim = ini + (Number(x.quantidade) || 1) - 1;
+    usadas.set(x.contratoId, fim); faixa.set(x.id, { ini, fim });
+  }
+  _uso = { s: S.sessoes, c: S.contratos, v: { usadas, faixa } };
+  return _uso.v;
+}
+const usadasDe = (ctId, ignorarSessao) => {
+  const u = usoContratos().usadas.get(ctId) || 0;
+  const s = ignorarSessao && S.sessoes.find((x) => x.id === ignorarSessao && x.contratoId === ctId && x.status !== 'recusada');
+  return u - (s ? Number(s.quantidade) || 0 : 0);
+};
+const restantesDe = (ct, ignorarSessao) => Number(ct.sessoesContratadas) - usadasDe(ct.id, ignorarSessao);
+// contrato sugerido para um cliente: o primeiro ativo que ainda tem sessões
+const contratoSugerido = (clienteId, ignorarSessao, servico = 'sessao') => contratosDoCliente(clienteId, servico).find((c) => c.status === 'ativo' && restantesDe(c, ignorarSessao) > 0) || null;
+// valor da sessão nº n do contrato (a última pode ter o ajuste de arredondamento)
+const valorSessaoN = (ct, n) => (n === Number(ct.sessoesContratadas) && ct.valorUltimaSessao != null ? Number(ct.valorUltimaSessao) : Number(ct.valorSessao));
+// texto de como o valor por sessão foi calculado
+function textoValorContrato(ct) {
+  if (!(Number(ct.valorContrato) > 0) || ct.percentualCoach == null) return `${fmtUSD(ct.valorSessao)} por sessão`;
+  const ult = ct.valorUltimaSessao != null && Math.round(ct.valorUltimaSessao * 100) !== Math.round(ct.valorSessao * 100);
+  return `${fmtUSD(ct.valorContrato)} × ${String(ct.percentualCoach).replace('.', ',')}% ÷ ${ct.sessoesContratadas} = ${fmtUSD(ct.valorSessao)} por sessão${ult ? ` (última: ${fmtUSD(ct.valorUltimaSessao)})` : ''}`;
+}
+// prévia do cálculo no cadastro do contrato
+function calcContratoTexto(total, pct, sessoes) {
+  const t = Number(total), p = Number(pct), n = parseInt(sessoes, 10);
+  if (!(t > 0) || !(p > 0) || !(n >= 1)) return 'Preencha o valor do contrato, a % do coach e as sessões para ver o valor por sessão.';
+  const v = valoresContrato(t, p, n);
+  return `Participação do coach: ${fmtUSD(t)} × ${String(p).replace('.', ',')}% = ${fmtUSD(v.participacao)}  ·  ÷ ${n} sessões = ${fmtUSD(v.valorSessao)} por sessão`
+    + (v.exato ? '' : `  ·  a última sessão fica com ${fmtUSD(v.valorUltimaSessao)} para fechar exatamente ${fmtUSD(v.participacao)}`);
+}
+// próximo número de contrato: AAAA-NNN, sequencial no ano
+function proximoNumeroContrato() {
+  const ano = hojeISO().slice(0, 4);
+  const max = S.contratos.reduce((m, c) => { const r = String(c.numero || '').match(/^(\d{4})-(\d+)$/); return r && r[1] === ano ? Math.max(m, +r[2]) : m; }, 0);
+  return `${ano}-${String(max + 1).padStart(3, '0')}`;
+}
+function rotuloContrato(sessao) {
+  const ct = sessao.contratoId && contrato(sessao.contratoId);
+  if (!ct) return '';
+  const f = usoContratos().faixa.get(sessao.id);
+  const num = f ? (f.fim > f.ini ? `sessões ${f.ini}–${f.fim}` : `sessão ${f.ini}`) : 'sessão';
+  const exc = f && f.fim > Number(ct.sessoesContratadas);
+  return `<div class="nota num" ${exc ? 'style="color:var(--bad)"' : ''}>Contrato ${esc(ct.numero)} · ${num} de ${ct.sessoesContratadas}${exc ? ' (acima do contratado)' : ''}</div>`;
+}
 function resumo(coachId, mes, statusIncluidos = ['aprovada']) {
   const cfg = cfgCoach(usuario(coachId));
   const f = fechamento(coachId, mes);
-  const ss = sessoesDe(coachId, mes).filter((s) => statusIncluidos.includes(s.status));
-  return calcularPagamento(cfg, mapaClientes(coachId), ss, f?.ajustes || []);
+  const fx = usoContratos().faixa;
+  const ss = sessoesDe(coachId, mes).filter((s) => statusIncluidos.includes(s.status)).map((s) => {
+    const ct = s.contratoId && contrato(s.contratoId), f = fx.get(s.id);
+    return ct && f && f.ini <= Number(ct.sessoesContratadas) && f.fim >= Number(ct.sessoesContratadas) ? { ...s, ultimaContrato: true } : s;
+  });
+  return calcularPagamento(cfg, mapaClientes(coachId), ss, f?.ajustes || [], mapaContratos());
 }
 
 // ============================================================ dados em tempo real
-function assinarSessoes() {
-  if (!S.perfil) return;
-  const filtros = leitor() ? [['mes', '==', S.mes]] : [['coachId', '==', uid()], ['mes', '==', S.mes]];
-  S.pronto.sessoes = false;
-  sub('sessoes', B.db.watch('sessoes', filtros, (l) => { S.sessoes = l; S.pronto.sessoes = true; render(); }, erroLeitura));
+// Todas as sessões (de todos os meses) ficam carregadas: a numeração das sessões de contrato depende do histórico.
+function assinarSessoes() { /* nada a fazer: as sessões de todos os meses já estão em S.sessoes */ }
+function carregarSessoesEContratos() {
+  const filtro = leitor() ? [] : [['coachId', '==', uid()]];
+  sub('sessoes', B.db.watch('sessoes', filtro, (l) => { S.sessoes = l; S.pronto.sessoes = true; render(); }, erroLeitura));
+  sub('contratos', B.db.watch('contratos', filtro, (l) => { S.contratos = l; render(); }, erroLeitura));
+  sub('sistema', B.db.watchDoc('config', 'sistema', (d) => { S.sistema = d; render(); }, () => {}));
 }
 // Um listener recusado não volta sozinho: tenta de novo algumas vezes (ex.: logo após ativar o perfil)
 let tentativasLeitura = 0, timerLeitura = null;
@@ -143,12 +210,12 @@ function iniciarDados() {
     sub('fech', B.db.watch('fechamentos', [['coachId', '==', uid()]], (l) => { S.fechamentos = l; render(); }, erroLeitura));
     S.view ||= 'lancar';
   }
-  assinarSessoes();
+  carregarSessoesEContratos();
 }
 
 B.auth.onChange(async (u) => {
   limparSubs();
-  Object.assign(S, { auth: u, perfil: undefined, view: null, mes: mesAtual(), coachSel: null, importacao: null, usuarios: [], clientes: [], sessoes: [], fechamentos: [], pronto: {}, modal: null, edit: null });
+  Object.assign(S, { auth: u, perfil: undefined, view: null, mes: mesAtual(), coachSel: null, importacao: null, contratos: [], sistema: null, clienteSel: '', usuarios: [], clientes: [], sessoes: [], fechamentos: [], pronto: {}, modal: null, edit: null });
   if (!u) { render(); return; }
   render();
   sub('perfil', B.db.watchDoc('users', u.uid, async (p) => {
@@ -222,11 +289,11 @@ function telaSemPerfil() {
 
 function topo() {
   const itens = isAprov()
-    ? [['aprovacao', 'Aprovação final'], ['tabela', 'Tabela de valores'], ['fechamentos', 'Fechamentos']]
+    ? [['aprovacao', 'Aprovação final'], ['contratos', 'Contratos'], ['tabela', 'Tabela de valores'], ['fechamentos', 'Fechamentos']]
     : isFin()
-    ? [['valores', 'Conferência de valores'], ['tabela', 'Tabela de valores'], ['fechamentos', 'Fechamentos']]
+    ? [['valores', 'Conferência de valores'], ['contratos', 'Contratos'], ['tabela', 'Tabela de valores'], ['fechamentos', 'Fechamentos']]
     : staff()
-    ? [['painel', 'Painel'], ['conferencia', 'Conferência'], ['carteiras', 'Carteiras'], ['fechamentos', 'Fechamentos'],
+    ? [['painel', 'Painel'], ['conferencia', 'Conferência'], ['carteiras', 'Carteiras'], ['contratos', 'Contratos'], ['fechamentos', 'Fechamentos'],
        ...(isAdmin() ? [['valores', 'Conferência de valores'], ['aprovacao', 'Aprovação final']] : []), ['tabela', 'Tabela de valores'],
        ...(isAdmin() ? [['usuarios', 'Usuários'], ['importar', 'Importar histórico']] : [])]
     : [['lancar', 'Minhas sessões'], ['carteira', 'Minha carteira'], ['historico', 'Meus fechamentos']];
@@ -249,6 +316,7 @@ function conteudo() {
   const v = S.view;
   if (!leitor()) return v === 'carteira' ? vCarteiraCoach() : v === 'historico' ? vHistoricoCoach() : vLancar();
   if (v === 'tabela') return vTabela();
+  if (v === 'contratos') return vContratos();
   if (v === 'fechamentos') return vFechamentos();
   if (isAprov() || (v === 'aprovacao' && isAdmin())) return vValores('aprovacao');
   if (isFin() || (v === 'valores' && isAdmin())) return vValores('conferencia');
@@ -261,6 +329,39 @@ function conteudo() {
 }
 
 // ============================================================ COACH: lançar
+// Campo "Contrato" do formulário do coach (aparece para Sessão quando o cliente tem contrato)
+// contratos que o coach pode escolher no formulário (cliente + serviço selecionados) e o escolhido
+function contratosDoForm(e) {
+  const clienteId = S.clienteSel, servico = S.servicoSel || 'sessao';
+  if (!clienteId || clienteId === '__novo') return { cts: [], ct: null };
+  const cts = contratosDoCliente(clienteId, servico).filter((c) => c.status === 'ativo' || c.id === e?.contratoId);
+  if (!cts.length) return { cts, ct: null };
+  const sel = cts.some((c) => c.id === S.contratoSel) ? S.contratoSel : (e?.contratoId && cts.some((c) => c.id === e.contratoId) ? e.contratoId : contratoSugerido(clienteId, e?.id, servico)?.id || cts[0].id);
+  return { cts, ct: contrato(sel) };
+}
+function campoContrato(e) {
+  const clienteId = S.clienteSel, servico = S.servicoSel || 'sessao';
+  if (!clienteId || clienteId === '__novo') {
+    return clienteId === '__novo' && exigeContrato() && servico === 'sessao'
+      ? '<div class="campo largo"><div class="aviso erro"><div>Cliente novo não tem contrato. Peça ao financeiro para cadastrar o contrato antes de lançar sessões.</div></div></div>' : '';
+  }
+  const { cts, ct } = contratosDoForm(e);
+  if (!cts.length) {
+    if (servico !== 'sessao') return '';
+    return `<div class="campo largo"><div class="aviso ${exigeContrato() ? 'erro' : 'atencao'}"><div>${exigeContrato()
+      ? 'Este cliente não tem contrato ativo. Peça ao financeiro para cadastrar o contrato antes de lançar sessões.'
+      : 'Este cliente não tem contrato cadastrado: o valor segue a tabela (Tipo A/B).'}</div></div></div>`;
+  }
+  const sel = ct.id;
+  const rest = restantesDe(ct, e?.id);
+  const prox = usadasDe(ct.id, e?.id) + 1;
+  return `<div class="campo largo"><label for="f-contrato">Contrato</label><select id="f-contrato" data-change="contrato">
+      ${cts.map((c) => { const r = restantesDe(c, e?.id); return `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>Nº ${esc(c.numero)}${c.nome ? ' · ' + esc(c.nome) : ''} — ${c.sessoesContratadas - r} de ${c.sessoesContratadas} sessões usadas${r <= 0 ? ' (completo)' : ''}</option>`; }).join('')}</select>
+    <div class="dica num" style="${rest <= 0 ? 'color:var(--bad)' : ''}">${rest <= 0
+      ? `Contrato completo (${ct.sessoesContratadas} de ${ct.sessoesContratadas}). Para lançar mais sessões, o financeiro precisa cadastrar um novo contrato.`
+      : `Esta será a sessão ${prox} de ${ct.sessoesContratadas} · você recebe ${fmtUSD(valorSessaoN(ct, prox))} · restam ${rest}`}</div></div>`;
+}
+
 function vLancar() {
   const me = uid();
   const cfg = cfgCoach(S.perfil);
@@ -274,6 +375,7 @@ function vLancar() {
   const dataPadrao = S.mes === mesAtual() ? hoje : `${S.mes}-01`;
   const cont = { pendente: 0, aprovada: 0, recusada: 0 };
   lista.forEach((s) => cont[s.status]++);
+  const livreSemCt = extraLivre(cfg, S.servicoSel) && !contratosDoForm(e).ct;
 
   const form = trav ? '' : `<form class="card" data-form="sessao">
     <div class="cab"><h2>${e ? 'Editar sessão' : 'Registrar sessão'}</h2>${e ? '<button type="button" class="link" data-acao="cancelarEdit">Cancelar edição</button>' : ''}</div>
@@ -285,9 +387,10 @@ function vLancar() {
         ${carteira.map((c) => `<option value="${c.id}" ${e?.clienteId === c.id ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}
         <option value="__novo">+ Cliente novo</option></select></div>
       <div class="campo" ${S.novoCliente ? '' : 'hidden'}><label for="f-novo">Nome do cliente novo</label><input id="f-novo" placeholder="Nome e sobrenome" ${S.novoCliente ? 'required' : ''}></div>
+      ${campoContrato(e)}
       <div class="campo"><label for="f-servico">Serviço</label><select id="f-servico" data-change="servico">
         <option value="sessao">Sessão</option>${cfg.extras.map((x) => `<option value="${x.id}" ${e?.servico === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select></div>
-      <div class="campo" ${extraLivre(cfg, S.servicoSel) ? '' : 'hidden'}><label for="f-valor">Valor cobrado ($)</label><input id="f-valor" type="number" min="0.01" step="0.01" placeholder="Ex.: 350" value="${e?.valorInformado ?? ''}" ${extraLivre(cfg, S.servicoSel) ? 'required' : ''}>
+      <div class="campo" ${livreSemCt ? '' : 'hidden'}><label for="f-valor">Valor cobrado ($)</label><input id="f-valor" type="number" min="0.01" step="0.01" placeholder="Ex.: 350" value="${e?.valorInformado ?? ''}" ${livreSemCt ? 'required' : ''}>
         <div class="dica num" id="f-calc" data-servico="${esc(S.servicoSel)}">${esc(textoCalculo(extraDe(cfg, S.servicoSel), e?.valorInformado, e?.quantidade || 1))}</div></div>
       <div class="campo"><label for="f-qtd">Quantidade</label><input id="f-qtd" type="number" min="1" max="20" step="1" required value="${e ? e.quantidade : 1}"></div>
       <div class="campo largo"><label for="f-obs">Observação (opcional)</label><input id="f-obs" maxlength="300" value="${esc(e?.obs || '')}" placeholder="Ex.: sessão remarcada do dia 12"></div>
@@ -301,7 +404,7 @@ function vLancar() {
     const podeMexer = !trav && s.status !== 'aprovada';
     return `<tr class="${s.status === 'recusada' && s.comentario ? 'linha-rec' : ''}">
       <td class="num">${fmtDia(s.data)}</td>
-      <td>${esc(c?.nome || s.clienteNome)} ${tipoBadge(c)}${s.obs ? `<div class="nota">${esc(s.obs)}</div>` : ''}</td>
+      <td>${esc(c?.nome || s.clienteNome)} ${tipoBadge(c)}${rotuloContrato(s)}${s.obs ? `<div class="nota">${esc(s.obs)}</div>` : ''}</td>
       <td>${servicoHTML(cfg, s)}</td><td class="r">${s.quantidade}</td><td>${pill(s.status)}</td>
       <td class="r">${podeMexer ? `<button class="ico" data-acao="editar" data-id="${s.id}">Editar</button><button class="ico bad" data-acao="excluir" data-id="${s.id}">Excluir</button>` : ''}</td></tr>
       ${s.status === 'recusada' && s.comentario ? `<tr class="coment"><td></td><td colspan="5"><div class="coment-box"><b>Bia:</b> ${esc(s.comentario)}</div></td></tr>` : ''}`;
@@ -368,7 +471,7 @@ function vCarteiraCoach() {
         <div class="campo"><label for="nc-nome">Adicionar cliente</label><input id="nc-nome" required placeholder="Nome e sobrenome"></div>
         <div><button class="btn pri" type="submit">Adicionar</button></div></form>
       ${lista.length ? `<div class="tabwrap"><table><thead><tr><th>Nº</th><th>Cliente</th><th>Tipo</th><th class="r">Valor especial</th><th>Situação</th></tr></thead><tbody>
-        ${lista.map((c) => `<tr><td class="num">${c.ordem || ''}</td><td>${esc(c.nome)}</td><td>${tipoBadge(c)}</td><td class="r num">${Number(c.valorSessao) > 0 ? fmtUSD(c.valorSessao) : '<span class="nota">—</span>'}</td>
+        ${lista.map((c) => `<tr><td class="num">${c.ordem || ''}</td><td>${esc(c.nome)}${contratosDoCliente(c.id).map((ct) => `<div class="nota num">Contrato Nº ${esc(ct.numero)}${servicoCt(ct) !== 'sessao' ? ' · ' + esc(nomeServico(cfgCoach(S.perfil), servicoCt(ct))) : ''} · ${usadasDe(ct.id)} de ${ct.sessoesContratadas} sessões · ${fmtUSD(ct.valorSessao)}/sessão${ct.status !== 'ativo' ? ' · encerrado' : ''}</div>`).join('')}</td><td>${tipoBadge(c)}</td><td class="r num">${Number(c.valorSessao) > 0 ? fmtUSD(c.valorSessao) : '<span class="nota">—</span>'}</td>
           <td>${c.ativo === false ? '<span class="nota">Inativo</span>' : c.tipoConfirmado === false ? '<span class="nota">Tipo a confirmar pela Bia</span>' : '<span class="nota">Ativo</span>'}</td></tr>`).join('')}
       </tbody></table></div>` : '<div class="vazio">Sua carteira está vazia. Adicione clientes aqui ou direto ao registrar uma sessão.</div>'}
     </section>`;
@@ -437,8 +540,19 @@ function alertas(coachId, lista, mapa) {
   lista.filter((s) => s.status !== 'recusada').forEach((s) => { const k = s.clienteId + s.data + s.servico; vistos[k] = (vistos[k] || 0) + 1; });
   const dup = lista.filter((s, i) => vistos[s.clienteId + s.data + s.servico] > 1 && lista.findIndex((x) => x.clienteId === s.clienteId && x.data === s.data && x.servico === s.servico) === i);
   dup.forEach((s) => itens.push(`Possível lançamento em dobro: <b>${esc(mapa.get(s.clienteId)?.nome || s.clienteNome)}</b> em ${fmtDia(s.data)}.`));
+  // contratos: sessões acima do contratado e sessões sem contrato de clientes que têm contrato ativo
+  const uso = usoContratos();
+  const excedidos = S.contratos.filter((c) => c.coachId === coachId && (uso.usadas.get(c.id) || 0) > Number(c.sessoesContratadas));
+  excedidos.forEach((c) => itens.push(`Contrato <b>Nº ${esc(c.numero)}</b> (${esc(nomeCliente(c.clienteId))}) passou do limite: ${uso.usadas.get(c.id)} de ${c.sessoesContratadas} sessões.`));
+  const semCt = lista.filter((s) => s.status !== 'recusada' && !s.contratoId
+    && contratosDoCliente(s.clienteId, s.servico || 'sessao').some((c) => c.status === 'ativo'));
+  if (semCt.length) itens.push(`${semCt.length} sessão(ões) sem contrato de cliente que tem contrato ativo (${[...new Set(semCt.map((s) => esc(mapa.get(s.clienteId)?.nome || s.clienteNome)))].join(', ')}). Use <b>Editar</b> para escolher o contrato.`);
+  if (exigeContrato()) {
+    const semNenhum = lista.filter((s) => s.status !== 'recusada' && (s.servico || 'sessao') === 'sessao' && !s.contratoId && !contratosDoCliente(s.clienteId).length);
+    if (semNenhum.length) itens.push(`${semNenhum.length} sessão(ões) de cliente sem contrato cadastrado.`);
+  }
   const cfgA = cfgCoach(usuario(coachId));
-  const semValor = lista.filter((s) => s.status !== 'recusada' && extraLivre(cfgA, s.servico) && !(Number(s.valorInformado) > 0));
+  const semValor = lista.filter((s) => s.status !== 'recusada' && !s.contratoId && extraLivre(cfgA, s.servico) && !(Number(s.valorInformado) > 0));
   if (semValor.length) itens.push(`${semValor.length} lançamento(s) de serviço com valor livre sem valor informado. Corrija em Editar.`);
   const fut = lista.filter((s) => s.data > hojeISO());
   if (fut.length) itens.push(`${fut.length} lançamento(s) com data futura.`);
@@ -465,7 +579,7 @@ function vConferencia() {
     return `<tr class="${s.status === 'recusada' && s.comentario ? 'linha-rec' : ''}">
       <td>${selecionavel ? `<input type="checkbox" aria-label="Selecionar" data-acao="sel" data-id="${s.id}" ${S.sel.has(s.id) ? 'checked' : ''}>` : ''}</td>
       <td class="num">${fmtDia(s.data)}</td>
-      <td>${esc(cl?.nome || s.clienteNome)} ${tipoBadge(cl)}${s.obs ? `<div class="nota">${esc(s.obs)}</div>` : ''}${s.reenviadaEm ? '<div class="nota">Reenviada após correção</div>' : ''}</td>
+      <td>${esc(cl?.nome || s.clienteNome)} ${tipoBadge(cl)}${rotuloContrato(s)}${s.obs ? `<div class="nota">${esc(s.obs)}</div>` : ''}${s.reenviadaEm ? '<div class="nota">Reenviada após correção</div>' : ''}</td>
       <td>${servicoHTML(cfg, s)}</td><td class="r">${s.quantidade}</td><td>${pill(s.status)}</td>
       <td class="r" style="white-space:nowrap">${trav ? '' : s.status === 'pendente'
         ? `<button class="ico ok" data-acao="aprovar" data-id="${s.id}">Aprovar</button><button class="ico bad" data-acao="recusar" data-id="${s.id}">Recusar</button><button class="ico" data-acao="editarBia" data-id="${s.id}">Editar</button>`
@@ -623,6 +737,44 @@ function lerValores(u) {
     bonusRecorrencia: num('eu-brec'), minSessoesBonus: Math.max(2, parseInt(val('eu-min') || '2', 10)), extras };
 }
 
+// ============================================================ CONTRATOS
+const editaContratos = () => isAdmin() || isFin();
+function vContratos() {
+  const cs = coaches();
+  const filtro = S.ctCoach || '';
+  const busca = norm(S.ctBusca || '');
+  const lista = S.contratos.filter((c) => (!filtro || c.coachId === filtro) && (!busca || norm(`${c.numero} ${c.nome} ${nomeCliente(c.clienteId)}`).includes(busca)))
+    .sort((a, b) => (a.status === 'ativo' ? 0 : 1) - (b.status === 'ativo' ? 0 : 1) || String(a.numero).localeCompare(String(b.numero), 'pt', { numeric: true }));
+  const nAtivos = S.contratos.filter((c) => c.status === 'ativo').length;
+  const nAcabando = S.contratos.filter((c) => c.status === 'ativo' && restantesDe(c) <= 2 && restantesDe(c) > 0).length;
+  const nCompletos = S.contratos.filter((c) => c.status === 'ativo' && restantesDe(c) <= 0).length;
+  const linhas = lista.map((c) => {
+    const usadas = usadasDe(c.id), tot = Number(c.sessoesContratadas), pct = Math.min(100, Math.round(usadas / tot * 100));
+    const cor = usadas > tot ? 'var(--bad)' : usadas >= tot ? 'var(--pend)' : 'var(--accent)';
+    return `<tr><td class="num" style="white-space:nowrap"><b>${esc(c.numero)}</b></td><td>${esc(c.nome || '')}${servicoCt(c) !== 'sessao' ? `<div class="nota">Serviço: ${esc(nomeServico(cfgCoach(usuario(c.coachId)), servicoCt(c)))}</div>` : ''}${c.obs ? `<div class="nota">${esc(c.obs)}</div>` : ''}</td>
+      <td>${esc(nomeCliente(c.clienteId) || c.clienteNome || '')}</td><td>${esc(usuario(c.coachId)?.nome || '')}</td>
+      <td class="num" style="min-width:130px">${usadas} de ${tot}${Number(c.sessoesAnteriores) ? `<div class="nota">${c.sessoesAnteriores} antes do sistema</div>` : ''}
+        <div style="height:5px;border-radius:3px;background:var(--line);margin-top:4px"><div style="height:5px;border-radius:3px;width:${pct}%;background:${cor}"></div></div></td>
+      <td class="r">${fmtUSD(c.valorSessao)}${Number(c.valorContrato) > 0 ? `<div class="nota num">${fmtUSD(c.valorContrato)} × ${String(c.percentualCoach).replace('.', ',')}% ÷ ${tot}</div>` : ''}${c.valorUltimaSessao != null && Math.round(c.valorUltimaSessao * 100) !== Math.round(c.valorSessao * 100) ? `<div class="nota num">última: ${fmtUSD(c.valorUltimaSessao)}</div>` : ''}</td><td>${c.dataInicio ? fmtDiaAno(c.dataInicio) : '<span class="nota">—</span>'}</td>
+      <td>${c.status !== 'ativo' ? '<span class="pill p-aberto">Encerrado</span>' : usadas >= tot ? '<span class="pill p-pendente">Completo</span>' : '<span class="pill p-aprovada">Ativo</span>'}</td>
+      <td class="r" style="white-space:nowrap">${editaContratos() ? `<button class="ico" data-acao="modal" data-tipo="contrato" data-id="${c.id}">Editar</button>
+        <button class="ico" data-acao="statusContrato" data-id="${c.id}">${c.status === 'ativo' ? 'Encerrar' : 'Reativar'}</button>` : ''}</td></tr>`;
+  }).join('');
+  return `<div class="cab"><div><h1>Contratos</h1><p>Cada contrato define o cliente, o coach, o serviço, quantas sessões foram contratadas e quanto o coach recebe por sessão (valor do contrato × % do coach ÷ sessões). O sistema numera as sessões e bloqueia o lançamento quando o contrato acaba.</p></div>
+      ${editaContratos() ? '<button class="btn pri" data-acao="modal" data-tipo="contrato">Novo contrato</button>' : ''}</div>
+    <div class="kpis"><div class="kpi"><small>Contratos ativos</small><strong>${nAtivos}</strong></div>
+      <div class="kpi ${nAcabando ? 'alerta' : ''}"><small>Com 2 ou menos sessões restantes</small><strong>${nAcabando}</strong></div>
+      <div class="kpi ${nCompletos ? 'alerta' : ''}"><small>Completos (ainda ativos)</small><strong>${nCompletos}</strong></div></div>
+    ${isAdmin() ? `<section class="card"><label class="acoes"><input type="checkbox" id="cfg-exigir" data-change="exigirContrato" ${exigeContrato() ? 'checked' : ''}>
+      <span><b>Exigir contrato para lançar sessões.</b> <span class="nota">Ligado: o coach só lança "Sessão" para clientes com contrato ativo. Desligado: cliente sem contrato continua pela tabela (Tipo A/B). Deixe desligado até cadastrar os contratos dos clientes atuais.</span></span></label></section>` : ''}
+    <section class="card"><div class="acoes" style="margin-bottom:12px;align-items:end">
+        <div class="campo" style="min-width:200px"><label for="ct-filtro">Coach</label><select id="ct-filtro" data-change="ctFiltro"><option value="">Todos</option>${cs.map((c) => `<option value="${c.id}" ${c.id === filtro ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select></div>
+        <div class="campo" style="min-width:220px"><label for="ct-busca">Buscar</label><input id="ct-busca" data-input="ctBusca" placeholder="Nº, nome ou cliente" value="${esc(S.ctBusca || '')}"></div></div>
+      ${lista.length ? `<div class="tabwrap"><table><thead><tr><th>Nº</th><th>Contrato</th><th>Cliente</th><th>Coach</th><th>Sessões</th><th class="r">Valor/sessão</th><th>Início</th><th>Situação</th><th></th></tr></thead><tbody>${linhas}</tbody></table></div>`
+        : `<div class="vazio">${S.contratos.length ? 'Nenhum contrato com esse filtro.' : `Nenhum contrato cadastrado ainda.${editaContratos() ? ' Clique em <b>Novo contrato</b> para começar.' : ''}`}</div>`}
+    </section>`;
+}
+
 // ============================================================ FINANCEIRO: tabela de valores e conferência
 // etapas depois do fechamento da Bia: conferência (financeiro) → aprovação final (Ricardo)
 const pillConf = (f) => (!f || f.status !== 'fechado') ? '<span class="pill p-aberto">Aguardando fechamento</span>'
@@ -656,6 +808,8 @@ function refTabela(cfg, l) {
   if (l.chave === 'B') return cfg.valorB;
   if (l.chave === 'bonusRec') return cfg.bonusRecorrencia;
   if (l.chave === 'bonusAtivo') return cfg.bonusAtivo;
+  if (l.chave?.startsWith('ct:')) { const c = contrato(l.chave.slice(3)); return c ? Number(c.valorSessao) : undefined; }
+  if (l.chave?.startsWith('ctu:')) { const c = contrato(l.chave.slice(4)); return c ? Number(c.valorUltimaSessao ?? c.valorSessao) : undefined; }
   if (l.chave?.startsWith('cli:')) { const c = S.clientes.find((x) => x.id === l.chave.slice(4)); return Number(c?.valorSessao) > 0 ? Number(c.valorSessao) : undefined; }
   if (l.chave?.startsWith('extra:')) { const x = cfg.extras.find((e) => 'extra:' + e.id === l.chave); return x ? (x.livre ? (percentualDe(x) < 100 ? `livre ${percentualDe(x)}%` : 'livre') : x.valor) : undefined; }
   return undefined;
@@ -686,12 +840,17 @@ function vValores(modo = 'conferencia') {
     ${divs.length ? `<p class="nota">${divs.length} mês(es) com ${aprov ? 'problema apontado na aprovação' : 'divergência apontada'}, aguardando correção: ${divs.map((f) => `<button class="link" data-acao="irValores" data-coach="${f.coachId}" data-mes="${f.mes}">${esc(usuario(f.coachId)?.nome || '')} · ${mesLabel(f.mes)}</button>`).join(', ')}.</p>` : ''}
     ${nHist ? `<p class="nota">O histórico importado das planilhas (${nHist} meses fechados) está na aba <button class="link" data-acao="ir" data-view="fechamentos">Fechamentos</button> ou navegando pelos meses com as setas.</p>` : ''}
   </section>`;
+  const fechs = cs.map((c) => fechamento(c.id, S.mes)).filter((f) => f?.status === 'fechado');
+  const totGeral = Math.round(fechs.reduce((a, f) => a + Math.round(Number(f.total || 0) * 100), 0)) / 100;
+  const totParcial = Math.round(cs.filter((c) => fechamento(c.id, S.mes)?.status !== 'fechado').reduce((a, c) => a + Math.round(resumo(c.id, S.mes).total * 100), 0)) / 100;
+  const prontos = fechs.filter((f) => f.origem !== 'planilha' && f.conferencia?.status === 'ok' && !f.aprovacao);
+  const rodape = `<tfoot><tr><td>Total do mês (fechados: ${fechs.length} de ${cs.length})</td><td></td><td class="r">${fmtUSD(totGeral)}${totParcial ? `<div class="nota">+ ${fmtUSD(totParcial)} parcial em meses abertos</div>` : ''}</td><td></td><td class="r">${aprov && prontos.length ? `<button class="btn sm pri" data-acao="modal" data-tipo="aprovarTodos">${prontos.length > 1 ? `Aprovar os ${prontos.length} conferidos` : "Aprovar o conferido"}</button>` : ''}</td></tr></tfoot>`;
   const titulo = aprov
-    ? '<h1>Aprovação final</h1><p>Revise o que o financeiro conferiu e dê a aprovação final do pagamento de cada coach.</p>'
+    ? '<h1>Aprovação final</h1><p>Veja o total de cada coach já conferido pelo financeiro e dê a aprovação final. Você pode abrir os detalhes de um coach ou aprovar todos os conferidos de uma vez.</p>'
     : '<h1>Conferência de valores</h1><p>Confira o valor de cada coach depois que a Bia fechar o mês. Durante o mês, os valores aparecem como parciais (só sessões já aprovadas).</p>';
   return `<div class="cab"><div>${titulo}</div>${seletorMes()}</div>
     ${filaHTML}
-    <section class="card"><div class="cab"><h2>Coaches em ${mesLabel(S.mes)}</h2></div>${cs.length ? `<div class="tabwrap"><table><thead><tr><th>Coach</th><th>Mês</th><th class="r">Valor</th><th>Situação</th><th></th></tr></thead><tbody>${linhasTab}</tbody></table></div>` : '<div class="vazio">Nenhum coach cadastrado.</div>'}</section>
+    <section class="card"><div class="cab"><h2>Coaches em ${mesLabel(S.mes)}</h2></div>${cs.length ? `<div class="tabwrap"><table><thead><tr><th>Coach</th><th>Mês</th><th class="r">Valor</th><th>Situação</th><th></th></tr></thead><tbody>${linhasTab}</tbody>${rodape}</table></div>` : '<div class="vazio">Nenhum coach cadastrado.</div>'}</section>
     ${S.coachSel ? detalheValores(S.coachSel) : ''}`;
 }
 
@@ -705,7 +864,7 @@ function detalheValores(coachId) {
   const recalc = resumo(coachId, S.mes);          // sessões aprovadas x tabela atual
   const cfgEpoca = fech && f.config ? { ...cfg, ...f.config } : null;
   const mapa = mapaClientes(coachId);
-  const livres = sessoesDe(coachId).filter((s) => s.status === 'aprovada' && extraLivre(cfg, s.servico));
+  const livres = sessoesDe(coachId).filter((s) => s.status === 'aprovada' && !s.contratoId && extraLivre(cfg, s.servico));
   let divergencias = 0;
   const rows = linhas.map((l) => {
     const ref = refTabela(cfg, l);
@@ -782,11 +941,19 @@ function modal() {
     corpo = `<form data-form="editarBia" style="display:grid;gap:14px"><h2>Corrigir lançamento</h2>
       <div class="form">
         <div class="campo"><label for="eb-data">Data</label><input id="eb-data" type="date" required value="${s.data}"></div>
-        <div class="campo"><label for="eb-cliente">Cliente</label><select id="eb-cliente">${clientesDe(s.coachId).map((c) => `<option value="${c.id}" ${c.id === s.clienteId ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select></div>
+        <div class="campo"><label for="eb-cliente">Cliente</label><select id="eb-cliente" data-change="clienteBia">${clientesDe(s.coachId).map((c) => `<option value="${c.id}" ${c.id === s.clienteId ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select></div>
         <div class="campo"><label for="eb-servico">Serviço</label><select id="eb-servico" data-change="servicoBia"><option value="sessao">Sessão</option>${cfg.extras.map((x) => `<option value="${x.id}" ${(m.servico ?? s.servico) === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select></div>
         <div class="campo" ${extraLivre(cfg, m.servico ?? s.servico) ? '' : 'hidden'}><label for="eb-valor">Valor cobrado ($)</label><input id="eb-valor" type="number" min="0.01" step="0.01" value="${s.valorInformado ?? ''}">
           <div class="dica num" id="eb-calc">${esc(textoCalculo(extraDe(cfg, m.servico ?? s.servico), s.valorInformado, s.quantidade))}</div></div>
         <div class="campo"><label for="eb-qtd">Quantidade</label><input id="eb-qtd" type="number" min="1" max="20" required value="${s.quantidade}"></div>
+        ${(() => {
+          const cliId = m.cliente ?? s.clienteId;
+          const sv = m.servico ?? s.servico ?? 'sessao';
+          const cts = contratosDoCliente(cliId, sv).filter((c) => c.status === 'ativo' || c.id === s.contratoId);
+          if (!cts.length) return sv === 'sessao' ? `<div class="campo largo"><p class="nota" style="margin:0">Cliente sem contrato: o valor segue a tabela (Tipo A/B).</p></div>` : '';
+          const sel = m.contrato || (cliId === s.clienteId && s.contratoId && cts.some((c) => c.id === s.contratoId) ? s.contratoId : contratoSugerido(cliId, s.id, sv)?.id || cts[0].id);
+          return `<div class="campo largo"><label for="eb-contrato">Contrato</label><select id="eb-contrato" data-change="contratoBia">${cts.map((c) => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>Nº ${esc(c.numero)}${c.nome ? ' · ' + esc(c.nome) : ''} — restam ${Math.max(0, restantesDe(c, s.id))} de ${c.sessoesContratadas}</option>`).join('')}</select></div>`;
+        })()}
       </div>
       <label class="acoes"><input type="checkbox" id="eb-aprovar" checked> Aprovar após salvar</label>
       <div class="acoes"><button class="btn pri" type="submit">Salvar</button><button class="btn" type="button" data-acao="fecharModal">Cancelar</button></div></form>`;
@@ -837,6 +1004,46 @@ function modal() {
       <p>${esc(u?.nome)} · ${mesLabel(S.mes)}. A Bia e o administrador veem o comentário. Para corrigir, o administrador reabre o mês.</p>
       <div class="campo"><label for="dv-txt">O que está diferente</label><textarea id="dv-txt" required maxlength="800" placeholder="Ex.: sessão Tipo B deveria ser $95 a partir de setembro"></textarea></div>
       <div class="acoes"><button class="btn pri" type="submit">Registrar divergência</button><button class="btn" type="button" data-acao="fecharModal">Cancelar</button></div></form>`;
+  } else if (m.tipo === 'contrato') {
+    const c = m.id ? contrato(m.id) : null;
+    const coachId = m.coach ?? c?.coachId ?? (S.ctCoach || coaches().find((x) => x.ativo !== false)?.id || '');
+    const clis = coachId ? clientesDe(coachId).filter((x) => x.ativo !== false || x.id === c?.clienteId) : [];
+    const cliente = m.cliente ?? c?.clienteId ?? '';
+    const cfgC = coachId ? cfgCoach(usuario(coachId)) : { extras: [] };
+    const servico = m.servico ?? (c ? servicoCt(c) : 'sessao');
+    const forma = m.forma ?? (c && !(Number(c.valorContrato) > 0) ? 'fixo' : 'pct');
+    const travaUso = c && usadasDe(c.id) - (Number(c.sessoesAnteriores) || 0) > 0;
+    const abertasSem = !c && cliente && cliente !== '__novo'
+      ? S.sessoes.filter((x) => x.clienteId === cliente && !x.contratoId && (x.servico || 'sessao') === servico && x.status !== 'recusada' && !fechado(x.coachId, x.mes)) : [];
+    corpo = `<form data-form="contrato" style="display:grid;gap:14px"><h2>${c ? `Contrato Nº ${esc(c.numero)}` : 'Novo contrato'}</h2>
+      <div class="form">
+        <div class="campo"><label for="ct-numero">Nº do contrato</label><input id="ct-numero" required maxlength="40" value="${esc(c?.numero || proximoNumeroContrato())}">${c ? '' : '<div class="dica">Gerado automaticamente (sequencial do ano).</div>'}</div>
+        <div class="campo"><label for="ct-nome">Nome do contrato</label><input id="ct-nome" maxlength="120" value="${esc(c?.nome || '')}" placeholder="Ex.: Mentoria 10 sessões"></div>
+        <div class="campo"><label for="ct-coach">Coach</label><select id="ct-coach" required data-change="ctCoach" ${travaUso ? 'disabled' : ''}><option value="">Selecione…</option>${coaches().filter((x) => x.ativo !== false || x.id === coachId).map((x) => `<option value="${x.id}" ${x.id === coachId ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select></div>
+        <div class="campo"><label for="ct-cliente">Cliente</label><select id="ct-cliente" required data-change="ctCliente" ${travaUso ? 'disabled' : ''}><option value="">Selecione…</option>${clis.map((x) => `<option value="${x.id}" ${x.id === cliente ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}<option value="__novo" ${cliente === '__novo' ? 'selected' : ''}>+ Cliente novo</option></select></div>
+        <div class="campo largo" ${cliente === '__novo' ? '' : 'hidden'}><label for="ct-cliente-novo">Nome do cliente novo</label><input id="ct-cliente-novo" ${cliente === '__novo' ? 'required' : ''} placeholder="Nome e sobrenome"></div>
+        <div class="campo"><label for="ct-servico">Serviço do contrato</label><select id="ct-servico" data-change="ctServico" ${travaUso ? 'disabled' : ''}><option value="sessao">Sessão</option>${cfgC.extras.map((x) => `<option value="${x.id}" ${servico === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select></div>
+        <div class="campo"><label for="ct-forma">Como calcular o valor ao coach</label><select id="ct-forma" data-change="ctForma"><option value="pct" ${forma === 'pct' ? 'selected' : ''}>Valor do contrato × % do coach</option><option value="fixo" ${forma === 'fixo' ? 'selected' : ''}>Valor fixo por sessão</option></select></div>
+        <div class="campo"><label for="ct-sessoes">Sessões contratadas</label><input id="ct-sessoes" type="number" min="1" max="500" step="1" required value="${c?.sessoesContratadas ?? 10}"></div>
+        <div class="campo"><label for="ct-anteriores">Sessões já feitas antes do sistema</label><input id="ct-anteriores" type="number" min="0" step="1" value="${c?.sessoesAnteriores ?? 0}"></div>
+        ${forma === 'pct' ? `<div class="campo"><label for="ct-total">Valor do contrato ($)</label><input id="ct-total" type="number" min="0.01" step="0.01" required value="${c?.valorContrato ?? ''}" placeholder="Ex.: 2500"></div>
+        <div class="campo"><label for="ct-pct">Participação do coach (%)</label><input id="ct-pct" type="number" min="0.01" max="100" step="0.01" required value="${c?.percentualCoach ?? ''}" placeholder="Ex.: 40"></div>
+        <div class="campo largo"><div class="aviso fechado"><div class="num" id="ct-calc">${esc(calcContratoTexto(c?.valorContrato, c?.percentualCoach, c?.sessoesContratadas ?? 10))}</div></div></div>`
+        : `<div class="campo"><label for="ct-valor">Valor ao coach por sessão ($)</label><input id="ct-valor" type="number" min="0" step="0.01" required value="${c?.valorSessao ?? ''}"></div>`}
+        <div class="campo"><label for="ct-inicio">Início (opcional)</label><input id="ct-inicio" type="date" value="${c?.dataInicio || ''}"></div>
+        <div class="campo largo"><label for="ct-obs">Observação (opcional)</label><input id="ct-obs" maxlength="300" value="${esc(c?.obs || '')}"></div>
+      </div>
+      ${abertasSem.length ? `<label class="acoes"><input type="checkbox" id="ct-vincular" checked> Vincular a este contrato as ${abertasSem.length} sessão(ões) deste cliente já lançadas em meses abertos (${[...new Set(abertasSem.map((x) => mesLabel(x.mes)))].join(', ')}). Elas passam a contar no contrato e a usar o valor dele.</label>` : ''}
+      <p class="nota" style="margin:0">"Sessões já feitas antes do sistema" são as que aconteceram antes de usar o sistema (ou fora dele). As sessões lançadas no sistema e vinculadas ao contrato são contadas automaticamente: não some as duas coisas.${c ? ' Mudar o valor altera os meses abertos; meses fechados não mudam.' : ''}</p>
+      <div class="acoes"><button class="btn pri" type="submit">${c ? 'Salvar' : 'Cadastrar contrato'}</button><button class="btn" type="button" data-acao="fecharModal">Cancelar</button></div></form>`;
+  } else if (m.tipo === 'aprovarTodos') {
+    const fs = coaches().map((c) => fechamento(c.id, S.mes)).filter((f) => f?.status === 'fechado' && f.origem !== 'planilha' && f.conferencia?.status === 'ok' && !f.aprovacao);
+    const tot = fs.reduce((a, f) => a + Math.round(Number(f.total || 0) * 100), 0) / 100;
+    corpo = `<h2>Aprovar pagamentos de ${mesLabel(S.mes)}</h2>
+      <table class="resumo"><tbody>${fs.map((f) => `<tr><td>${esc(usuario(f.coachId)?.nome || '')}<div class="nota">conferido por ${esc(f.conferencia.porNome || '')} em ${fmtDataHora(f.conferencia.em)}</div></td><td class="r num">${fmtUSD(f.total)}</td></tr>`).join('')}
+      <tr><td><b>Total</b></td><td class="r num"><b>${fmtUSD(tot)}</b></td></tr></tbody></table>
+      <p>Sua aprovação fica registrada em cada um, com seu nome e a data, e aparece no recibo em PDF.</p>
+      <div class="acoes"><button class="btn pri" data-acao="confirmarAprovarTodos">${fs.length > 1 ? `Aprovar os ${fs.length} pagamentos` : "Aprovar o pagamento"}</button><button class="btn" data-acao="fecharModal">Cancelar</button></div>`;
   } else if (m.tipo === 'aprovar') {
     const u = usuario(m.id), f = fechamento(m.id, S.mes);
     corpo = `<h2>Aprovar pagamento</h2>
@@ -880,8 +1087,8 @@ const acoes = {
   abrirMes(d) { S.mes = d.mes; S.view = 'lancar'; assinarSessoes(); render(); },
   conferir(d) { S.coachSel = d.coach; S.view = 'conferencia'; S.filtro = 'todas'; S.sel.clear(); render(); window.scrollTo(0, 0); },
   irConf(d) { S.coachSel = d.coach; S.mes = d.mes; S.view = isAprov() ? 'aprovacao' : isFin() ? 'valores' : 'conferencia'; S.filtro = 'todas'; assinarSessoes(); render(); window.scrollTo(0, 0); },
-  editar(d) { S.edit = d.id; S.novoCliente = false; S.servicoSel = S.sessoes.find((x) => x.id === d.id)?.servico || 'sessao'; render(true); window.scrollTo(0, 0); },
-  cancelarEdit() { S.edit = null; S.novoCliente = false; S.servicoSel = 'sessao'; render(true); },
+  editar(d) { const x = S.sessoes.find((y) => y.id === d.id); S.edit = d.id; S.novoCliente = false; S.servicoSel = x?.servico || 'sessao'; S.clienteSel = x?.clienteId || ''; S.contratoSel = x?.contratoId || ''; render(true); window.scrollTo(0, 0); },
+  cancelarEdit() { S.edit = null; S.novoCliente = false; S.servicoSel = 'sessao'; S.clienteSel = ''; S.contratoSel = ''; render(true); },
   excluir(d) { S.modal = { tipo: 'excluir', id: d.id }; render(); },
   async confirmarExcluir() { const id = S.modal.id; S.modal = null; if (S.edit === id) S.edit = null; render(); await tentar(() => B.db.del('sessoes', id), 'Lançamento excluído.'); },
   modal(d) { S.modal = { tipo: d.tipo, id: d.id }; render(); },
@@ -935,7 +1142,18 @@ const acoes = {
     await tentar(() => B.db.update('fechamentos', `${coachId}_${S.mes}`, { aprovacao: { status: 'ok', comentario: '', porNome: S.perfil.nome, por: uid(), em: new Date().toISOString() } }),
       'Pagamento aprovado.');
   },
+  async confirmarAprovarTodos() {
+    const fs = coaches().map((c) => fechamento(c.id, S.mes)).filter((f) => f?.status === 'fechado' && f.origem !== 'planilha' && f.conferencia?.status === 'ok' && !f.aprovacao);
+    S.modal = null; render();
+    const ap = { status: 'ok', comentario: '', porNome: S.perfil.nome, por: uid(), em: new Date().toISOString() };
+    await tentar(() => Promise.all(fs.map((f) => B.db.update('fechamentos', f.id, { aprovacao: ap }))), `${fs.length} pagamento(s) aprovado(s).`);
+  },
   async pdf(d) { await tentar(() => exportarPDF(d.coach, S.mes)); },
+  async statusContrato(d) {
+    const c = contrato(d.id);
+    await tentar(() => B.db.update('contratos', c.id, { status: c.status === 'ativo' ? 'encerrado' : 'ativo', atualizadoEm: B.db.agora(), atualizadoPorNome: S.perfil.nome }),
+      c.status === 'ativo' ? `Contrato Nº ${c.numero} encerrado.` : `Contrato Nº ${c.numero} reativado.`);
+  },
   async conferirValores(d) {
     await tentar(() => B.db.update('fechamentos', `${d.coach}_${S.mes}`, { conferencia: { status: 'ok', comentario: '', porNome: S.perfil.nome, por: uid(), em: new Date().toISOString() } }),
       'Valores marcados como conferidos.');
@@ -973,7 +1191,7 @@ async function clienteNovo(coachId, nome, tipoForcado) {
   const existente = lista.find((c) => norm(c.nome) === norm(nome));
   if (existente) return { id: existente.id, nome: existente.nome, jaExistia: true };
   const cfg = cfgCoach(usuario(coachId));
-  const dados = { coachId, nome, tipo: tipoForcado || tipoSugerido(cfg, lista), tipoConfirmado: staff(),
+  const dados = { coachId, nome, tipo: tipoForcado || tipoSugerido(cfg, lista), tipoConfirmado: staff() || isFin(),
     ordem: lista.reduce((m, c) => Math.max(m, c.ordem || 0), 0) + 1, ativo: true, criadoEm: B.db.agora(), criadoPor: uid() };
   const id = await B.db.add('clientes', dados);
   return { id, nome };
@@ -1008,8 +1226,20 @@ const forms = {
       if (!clienteNome) return toast('Selecione o cliente.', true);
     }
     const servico = val('f-servico') || 'sessao';
-    const dados = { coachId: me, clienteId, clienteNome, data, mes, quantidade: qtd, servico, obs: val('f-obs'), atualizadoEm: B.db.agora() };
-    if (extraLivre(cfgCoach(S.perfil), servico)) {
+    const eEdit = S.edit ? S.sessoes.find((s) => s.id === S.edit) : null;
+    let contratoId = null;
+    {
+      const cts = contratosDoCliente(clienteId, servico).filter((c) => c.status === 'ativo' || c.id === eEdit?.contratoId);
+      if (cts.length) {
+        const ct = contrato(val('f-contrato')) || contratoSugerido(clienteId, eEdit?.id, servico);
+        if (!ct) return toast('Escolha o contrato da sessão.', true);
+        const rest = restantesDe(ct, eEdit?.id);
+        if (qtd > rest) return toast(rest <= 0 ? `O contrato Nº ${ct.numero} já usou todas as ${ct.sessoesContratadas} sessões. Peça ao financeiro um novo contrato.` : `O contrato Nº ${ct.numero} só tem mais ${rest} sessão(ões).`, true);
+        contratoId = ct.id;
+      } else if (exigeContrato() && servico === 'sessao') return toast('Este cliente não tem contrato ativo. Peça ao financeiro para cadastrar o contrato.', true);
+    }
+    const dados = { coachId: me, clienteId, clienteNome, data, mes, quantidade: qtd, servico, contratoId, obs: val('f-obs'), atualizadoEm: B.db.agora() };
+    if (extraLivre(cfgCoach(S.perfil), servico) && !contratoId) {
       const v = Math.round(parseFloat(val('f-valor')) * 100) / 100;
       if (!(v > 0)) return toast(`Informe o valor cobrado de ${nomeServico(cfgCoach(S.perfil), servico)}.`, true);
       dados.valorInformado = v;
@@ -1024,7 +1254,7 @@ const forms = {
         mes === S.mes ? 'Sessão registrada.' : `Sessão registrada em ${mesLabel(mes)}.`);
     }
     if (ok === undefined) return;
-    S.edit = null; S.novoCliente = false; S.servicoSel = 'sessao';
+    S.edit = null; S.novoCliente = false; S.servicoSel = 'sessao'; S.clienteSel = ''; S.contratoSel = '';
     render(true);
   },
   async recusar() {
@@ -1039,10 +1269,21 @@ const forms = {
     const data = val('eb-data');
     const cli = S.clientes.find((c) => c.id === val('eb-cliente'));
     if (data.slice(0, 7) !== s.mes && fechado(s.coachId, data.slice(0, 7))) return toast('O mês da nova data já está fechado.', true);
+    let contratoId = null;
+    if (cli) {
+      const cts = contratosDoCliente(cli.id, val('eb-servico') || 'sessao').filter((c) => c.status === 'ativo' || c.id === s.contratoId);
+      if (cts.length) {
+        const ct = contrato(val('eb-contrato')) || contratoSugerido(cli.id, s.id, val('eb-servico') || 'sessao');
+        const q = parseInt(val('eb-qtd'), 10) || 1;
+        if (!ct) return toast('Escolha o contrato.', true);
+        if (q > restantesDe(ct, s.id)) return toast(`O contrato Nº ${ct.numero} não tem sessões suficientes (restam ${Math.max(0, restantesDe(ct, s.id))}).`, true);
+        contratoId = ct.id;
+      }
+    }
     const aprovar = document.getElementById('eb-aprovar').checked;
     const servico = val('eb-servico');
     let valorInformado = null;
-    if (extraLivre(cfgCoach(usuario(s.coachId)), servico)) {
+    if (extraLivre(cfgCoach(usuario(s.coachId)), servico) && !contratoId) {
       valorInformado = Math.round(parseFloat(val('eb-valor')) * 100) / 100;
       if (!(valorInformado > 0)) return toast('Informe o valor cobrado.', true);
     }
@@ -1051,7 +1292,7 @@ const forms = {
     if (!(quantidade >= 1 && quantidade <= 20)) return toast('Quantidade deve ser um número inteiro entre 1 e 20.', true);
     if (!cli) return toast('Selecione o cliente.', true);
     S.modal = null; render();
-    await tentar(() => B.db.update('sessoes', id, { data, mes: data.slice(0, 7), clienteId: cli.id, clienteNome: cli.nome, servico, valorInformado,
+    await tentar(() => B.db.update('sessoes', id, { data, mes: data.slice(0, 7), clienteId: cli.id, clienteNome: cli.nome, servico, valorInformado, contratoId,
       quantidade, corrigidoPorNome: S.perfil.nome, ...(aprovar ? { status: 'aprovada', comentario: '', ...quemRevisa() } : {}) }), 'Lançamento corrigido.');
   },
   async ajuste() {
@@ -1121,6 +1362,48 @@ const forms = {
     if (!config) return;
     S.modal = null; render();
     await tentar(() => B.db.update('users', u.id, { config, valoresAlteradosEm: B.db.agora(), valoresAlteradosPorNome: S.perfil.nome }), `Valores de ${u.nome} atualizados.`);
+  },
+  async contrato() {
+    const c = S.modal.id ? contrato(S.modal.id) : null;
+    const numero = val('ct-numero'), nome = val('ct-nome');
+    const coachId = c && document.getElementById('ct-coach').disabled ? c.coachId : val('ct-coach');
+    let clienteId = c && document.getElementById('ct-cliente').disabled ? c.clienteId : val('ct-cliente');
+    const sessoes = parseInt(val('ct-sessoes'), 10), anteriores = parseInt(val('ct-anteriores') || '0', 10);
+    const servico = c && document.getElementById('ct-servico').disabled ? servicoCt(c) : (val('ct-servico') || 'sessao');
+    const forma = val('ct-forma') || 'fixo';
+    let valor, valorContrato = null, percentualCoach = null, valorUltimaSessao = null;
+    if (forma === 'pct') {
+      valorContrato = Math.round(parseFloat(val('ct-total')) * 100) / 100;
+      percentualCoach = Math.round(parseFloat(val('ct-pct')) * 100) / 100;
+      if (!(valorContrato > 0)) return toast('Informe o valor do contrato.', true);
+      if (!(percentualCoach > 0 && percentualCoach <= 100)) return toast('Participação do coach: de 0,01% a 100%.', true);
+      const v = valoresContrato(valorContrato, percentualCoach, parseInt(val('ct-sessoes'), 10) || 1);
+      valor = v.valorSessao; valorUltimaSessao = v.valorUltimaSessao;
+    } else valor = Math.round(parseFloat(val('ct-valor')) * 100) / 100;
+    const vincular = !!document.getElementById('ct-vincular')?.checked;
+    const novoNome = val('ct-cliente-novo');
+    if (!numero) return toast('Informe o número do contrato.', true);
+    if (S.contratos.some((x) => x.id !== c?.id && norm(x.numero) === norm(numero))) return toast(`Já existe um contrato Nº ${numero}.`, true);
+    if (!coachId) return toast('Escolha o coach.', true);
+    if (!clienteId || (clienteId === '__novo' && novoNome.length < 2)) return toast('Escolha o cliente (ou digite o nome do cliente novo).', true);
+    if (!(sessoes >= 1 && sessoes <= 500)) return toast('Sessões contratadas: número inteiro de 1 a 500.', true);
+    if (!(anteriores >= 0 && anteriores <= sessoes)) return toast('Sessões já feitas antes do sistema: de 0 até o total contratado.', true);
+    if (!(valor >= 0)) return toast('Informe o valor ao coach por sessão.', true);
+    const abertas = !c && vincular && clienteId !== '__novo'
+      ? S.sessoes.filter((x) => x.clienteId === clienteId && !x.contratoId && (x.servico || 'sessao') === servico && x.status !== 'recusada' && !fechado(x.coachId, x.mes)) : [];
+    const jaLancadas = c ? usadasDe(c.id) - (Number(c.sessoesAnteriores) || 0) : abertas.reduce((a, x) => a + (Number(x.quantidade) || 1), 0);
+    if (anteriores + jaLancadas > sessoes) return toast(`O total passaria do contratado: ${anteriores} antes do sistema + ${jaLancadas} lançadas no sistema = ${anteriores + jaLancadas} de ${sessoes}.`, true);
+    S.modal = null; render();
+    await tentar(async () => {
+      if (clienteId === '__novo') { const n = await clienteNovo(coachId, novoNome, 'A'); clienteId = n.id; }
+      const dados = { numero, nome, coachId, clienteId, clienteNome: nomeCliente(clienteId) || novoNome, sessoesContratadas: sessoes, sessoesAnteriores: anteriores,
+        servico, valorContrato, percentualCoach, valorSessao: valor, valorUltimaSessao, dataInicio: val('ct-inicio') || null, obs: val('ct-obs'), atualizadoEm: B.db.agora(), atualizadoPorNome: S.perfil.nome };
+      let id = c?.id;
+      if (c) await B.db.update('contratos', c.id, dados);
+      else id = await B.db.add('contratos', { ...dados, status: 'ativo', criadoEm: B.db.agora(), criadoPorNome: S.perfil.nome });
+      if (abertas.length) await gravarPorMes(abertas.map((x) => ({ op: 'update', col: 'sessoes', id: x.id, chave: `${x.coachId}_${x.mes}`, data: { contratoId: id } })));
+      toast(c ? `Contrato Nº ${numero} atualizado.` : `Contrato Nº ${numero} cadastrado${abertas.length ? ` e ${abertas.length} sessão(ões) vinculada(s)` : ''}.`);
+    });
   },
   async problemaAprov() {
     const coachId = S.modal.id, txt = val('pa-txt');
@@ -1227,8 +1510,9 @@ function exportarCSV(coachId, mes) {
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const L = [[`Controle de Sessões | ${c.nome} | ${mesLabel(mes)}`],
     ['Coach', c.nome], ['Mês de referência', mesLabel(mes)], ...etapasTexto(f), ['Exportado em', new Date().toLocaleString('pt-BR')], [],
-    ['Mês', 'Data', 'Cliente', 'Tipo', 'Serviço', 'Valor cobrado', 'Valor pago ao coach (unit.)', 'Quantidade', 'Status', 'Observação', 'Comentário da revisão']];
-  sessoes.forEach((s) => { const cl = mapa.get(s.clienteId); L.push([mesLabel(mes), fmtDiaAno(s.data), cl?.nome || s.clienteNome, cl?.tipo || '', nomeServico(cfg, s.servico), s.valorInformado ? n(s.valorInformado) : '', s.valorInformado ? n(valorPagoUnit(extraDe(cfg, s.servico), s.valorInformado)) : '', s.quantidade, STATUS[s.status], s.obs || '', s.comentario || '']); });
+    ['Mês', 'Data', 'Cliente', 'Tipo', 'Serviço', 'Contrato', 'Nº da sessão no contrato', 'Valor cobrado', 'Valor pago ao coach (unit.)', 'Quantidade', 'Status', 'Observação', 'Comentário da revisão']];
+  sessoes.forEach((s) => { const cl = mapa.get(s.clienteId); const ct = s.contratoId && contrato(s.contratoId), fx = usoContratos().faixa.get(s.id);
+    L.push([mesLabel(mes), fmtDiaAno(s.data), cl?.nome || s.clienteNome, cl?.tipo || '', nomeServico(cfg, s.servico), ct ? ct.numero : '', fx && ct ? `${fx.fim > fx.ini ? fx.ini + ' a ' + fx.fim : fx.ini} de ${ct.sessoesContratadas}` : '', s.valorInformado ? n(s.valorInformado) : '', ct ? n(fx && fx.ini === fx.fim ? valorSessaoN(ct, fx.ini) : ct.valorSessao) : s.valorInformado ? n(valorPagoUnit(extraDe(cfg, s.servico), s.valorInformado)) : '', s.quantidade, STATUS[s.status], s.obs || '', s.comentario || '']); });
   L.push([], [`Resumo de valores - ${mesLabel(mes)}` + (f?.status === 'fechado' ? ' (fechado)' : ' (aprovadas, mês aberto)')], ['Tipo', 'Valor unitário', 'Quantidade', 'Valor total']);
   r.linhas.forEach((l) => L.push([l.descricao, l.valorUnit == null ? 'variável' : n(l.valorUnit), l.quantidade, n(l.total)]));
   ajustes.forEach((a) => L.push(['Ajuste: ' + a.descricao, '', '', n(a.valor)]));
@@ -1325,7 +1609,9 @@ async function exportarPDF(coachId, mes) {
       const cl = mapa.get(s.clienteId), ex = extraDe(cfg, s.servico);
       let serv = nomeServico(cfg, s.servico);
       if (ex?.livre && Number(s.valorInformado) > 0) serv += ` (cobrado ${fmtUSD(s.valorInformado)}; pago ${fmtUSD(valorPagoUnit(ex, s.valorInformado))})`;
-      return [fmtDiaAno(s.data), pdfTxt(cl?.nome || s.clienteNome), Number(cl?.valorSessao) > 0 ? 'Especial' : (cl?.tipo || ''), pdfTxt(serv), String(s.quantidade)];
+      const ct = s.contratoId && contrato(s.contratoId), fx = usoContratos().faixa.get(s.id);
+      if (ct) serv += ` - contrato ${ct.numero}, sessão ${fx ? (fx.fim > fx.ini ? fx.ini + ' a ' + fx.fim : fx.ini) : '?'} de ${ct.sessoesContratadas}`;
+      return [fmtDiaAno(s.data), pdfTxt(cl?.nome || s.clienteNome), ct ? 'Contrato' : Number(cl?.valorSessao) > 0 ? 'Especial' : (cl?.tipo || ''), pdfTxt(serv), String(s.quantidade)];
     }),
     styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 1.8, textColor: tinta },
     headStyles: { fillColor: verde, textColor: 255 },
@@ -1386,6 +1672,8 @@ $app.addEventListener('submit', async (ev) => {
 });
 $app.addEventListener('input', (ev) => {
   const id = ev.target.id;
+  if (ev.target.dataset.input === 'ctBusca') { S.ctBusca = ev.target.value; render(); return; }
+  if (['ct-total', 'ct-pct', 'ct-sessoes'].includes(id)) { const el = document.getElementById('ct-calc'); if (el) el.textContent = calcContratoTexto(val('ct-total'), val('ct-pct'), val('ct-sessoes')); return; }
   const par = { 'f-valor': ['f-calc', 'f-qtd', 'f-servico', () => cfgCoach(S.perfil)], 'f-qtd': ['f-calc', 'f-qtd', 'f-servico', () => cfgCoach(S.perfil)],
     'eb-valor': ['eb-calc', 'eb-qtd', 'eb-servico', () => cfgCoach(usuario(S.sessoes.find((x) => x.id === S.modal?.id)?.coachId))],
     'eb-qtd': ['eb-calc', 'eb-qtd', 'eb-servico', () => cfgCoach(usuario(S.sessoes.find((x) => x.id === S.modal?.id)?.coachId))] }[id];
@@ -1401,7 +1689,16 @@ $app.addEventListener('change', async (ev) => {
   const k = el.dataset.change;
   if (k === 'servico') { S.servicoSel = el.value; render(); }
   else if (k === 'servicoBia') { S.modal.servico = el.value; render(); }
-  else if (k === 'cliente') { S.novoCliente = el.value === '__novo'; render(); if (S.novoCliente) document.getElementById('f-novo')?.focus(); }
+  else if (k === 'cliente') { S.novoCliente = el.value === '__novo'; S.clienteSel = el.value; S.contratoSel = ''; render(); if (S.novoCliente) document.getElementById('f-novo')?.focus(); }
+  else if (k === 'contrato') { S.contratoSel = el.value; render(); }
+  else if (k === 'ctFiltro') { S.ctCoach = el.value; render(); }
+  else if (k === 'exigirContrato') { await tentar(() => B.db.set('config', 'sistema', { exigirContrato: el.checked }, true), el.checked ? 'Contrato passa a ser obrigatório para lançar sessões.' : 'Contrato deixa de ser obrigatório.'); }
+  else if (k === 'clienteBia') { S.modal.cliente = el.value; S.modal.contrato = ''; render(); }
+  else if (k === 'contratoBia') { S.modal.contrato = el.value; render(); }
+  else if (k === 'ctCoach') { S.modal.coach = el.value; S.modal.cliente = ''; S.modal.servico = 'sessao'; render(); }
+  else if (k === 'ctServico') { S.modal.servico = el.value; render(); }
+  else if (k === 'ctForma') { S.modal.forma = el.value; render(); }
+  else if (k === 'ctCliente') { S.modal.cliente = el.value; render(); }
   else if (k === 'coach') { S.coachSel = el.value; S.sel.clear(); render(); }
   else if (k === 'tipoCliente') { await tentar(() => B.db.update('clientes', el.dataset.id, { tipo: el.value, tipoConfirmado: true }), 'Tipo do cliente atualizado.'); }
 });

@@ -3,7 +3,7 @@
 // Nada é salvo: ao recarregar a página, os dados voltam ao estado inicial.
 
 export async function criarBackend() {
-  const store = { users: {}, clientes: {}, sessoes: {}, fechamentos: {}, config: {} };
+  const store = { users: {}, clientes: {}, sessoes: {}, fechamentos: {}, config: {}, contratos: {} };
   const ouvintes = new Set();
   let authCb = null, atual = null;
   const contas = {}; // email -> {uid, senha}
@@ -73,6 +73,17 @@ export async function criarBackend() {
     ses('u_bruno', 'Pessoa Seis', mes, d(12), 'pendente');
     ses('u_bruno', 'Pessoa Três', mes, d(12), 'pendente', { servico: 'mapeamento', obs: 'Mapeamento de perfil completo' });
     ses('u_bruno', 'Pessoa Quatro', mes, d(15), 'pendente', { servico: 'perfil-comportamental', valorInformado: 350 });
+    // contratos de exemplo: Cliente Alfa (Ana) e Pessoa Dois (Bruno)
+    store.contratos.ct_1 = { numero: '2026-001', nome: 'Mentoria 10 sessões', coachId: 'u_ana', clienteId: 'c_ana_0', clienteNome: 'Cliente Alfa',
+      sessoesContratadas: 10, sessoesAnteriores: 4, valorContrato: 2125, percentualCoach: 40, valorSessao: 85, valorUltimaSessao: 85, status: 'ativo', dataInicio: `${mesAnt}-01`, criadoPorNome: 'Alexandre (demo)' };
+    store.contratos.ct_2 = { numero: '2026-002', nome: 'Mentoria 10 sessões', coachId: 'u_bruno', clienteId: 'c_bruno_1', clienteNome: 'Pessoa Dois',
+      sessoesContratadas: 10, sessoesAnteriores: 7, valorSessao: 164.67, status: 'ativo', dataInicio: `${mesAnt}-01`, criadoPorNome: 'Alexandre (demo)' };
+    store.contratos.ct_3 = { numero: '2026-003', nome: 'Perfil comportamental', coachId: 'u_bruno', clienteId: 'c_bruno_2', clienteNome: 'Pessoa Três', servico: 'perfil-comportamental',
+      sessoesContratadas: 3, sessoesAnteriores: 0, valorContrato: 1000, percentualCoach: 70, valorSessao: 233.33, valorUltimaSessao: 233.34, status: 'ativo', dataInicio: `${mes}-01`, criadoPorNome: 'Alexandre (demo)' };
+    for (const x of Object.values(store.sessoes)) {
+      if (x.clienteId === 'c_ana_0') x.contratoId = 'ct_1';
+      if (x.clienteId === 'c_bruno_1') x.contratoId = 'ct_2';
+    }
   }
   seed();
 
