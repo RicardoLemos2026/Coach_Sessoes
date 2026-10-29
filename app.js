@@ -8,6 +8,11 @@ const B = configurado
   ? await (await import('./backend-firebase.js')).criarBackend(firebaseConfig)
   : await (await import('./backend-demo.js')).criarBackend();
 const DEMO = B.modo === 'demo';
+// "Ver como coach" (administrador): bloqueia qualquer gravação enquanto estiver só olhando
+for (const k of ['add', 'update', 'set', 'batch', 'delete']) {
+  const orig = B.db[k];
+  if (typeof orig === 'function') B.db[k] = (...a) => (S.verComo ? Promise.reject(new Error('Modo "ver como coach": é só visualização, nada foi alterado.')) : orig.apply(B.db, a));
+}
 
 // ============================================================ utilidades
 const $app = document.getElementById('app');
@@ -56,6 +61,7 @@ const S = {
   usuarios: [], clientes: [], sessoes: [], fechamentos: [], contratos: [], sistema: null,
   edit: null, novoCliente: false, servicoSel: 'sessao', clienteSel: '', contratoSel: '', sel: new Set(), filtro: 'todas',
   modal: null, importacao: null, pronto: {},
+  verComo: null, perfilAdmin: null,
 };
 const subs = {};
 function sub(chave, unsub) { if (subs[chave]) subs[chave](); subs[chave] = unsub; }
@@ -67,7 +73,7 @@ const isFin = () => S.perfil?.papel === 'financeiro';
 const isAprov = () => S.perfil?.papel === 'aprovador';     // Ricardo: aprovação final, depois do financeiro
 const leitor = () => staff() || isFin() || isAprov();     // vê todos os coaches
 const editaValores = () => isAdmin() || isFin();
-const uid = () => S.auth?.uid;
+const uid = () => S.verComo || S.auth?.uid;
 const usuario = (id) => (id === uid() ? { id, ...S.perfil } : S.usuarios.find((u) => u.id === id));
 const coaches = () => (leitor()
   ? S.usuarios.filter((u) => u.papel === 'coach').sort((a, b) => (a.ativo === false) - (b.ativo === false) || a.nome.localeCompare(b.nome))
@@ -215,10 +221,11 @@ function iniciarDados() {
 
 B.auth.onChange(async (u) => {
   limparSubs();
-  Object.assign(S, { auth: u, perfil: undefined, view: null, mes: mesAtual(), coachSel: null, importacao: null, contratos: [], sistema: null, clienteSel: '', usuarios: [], clientes: [], sessoes: [], fechamentos: [], pronto: {}, modal: null, edit: null });
+  Object.assign(S, { auth: u, perfil: undefined, verComo: null, perfilAdmin: null, view: null, mes: mesAtual(), coachSel: null, importacao: null, contratos: [], sistema: null, clienteSel: '', usuarios: [], clientes: [], sessoes: [], fechamentos: [], pronto: {}, modal: null, edit: null });
   if (!u) { render(); return; }
   render();
   sub('perfil', B.db.watchDoc('users', u.uid, async (p) => {
+    if (S.verComo) { S.perfilAdmin = p; render(); return; }
     const papelMudou = S.perfil && p && S.perfil.papel !== p.papel;
     S.perfil = p;
     if (!p) S.sistemaExiste = !!(await B.db.get('config', 'sistema').catch(() => ({})));
@@ -229,6 +236,7 @@ B.auth.onChange(async (u) => {
 
 // ============================================================ render com preservação de formulário
 function render(semRestaurar = false) {
+  if (S.verComo) { const c = S.usuarios.find((u) => u.id === S.verComo); if (c) S.perfil = { ...c, papel: 'coach' }; }
   const campos = {};
   if (!semRestaurar) $app.querySelectorAll('input[id], select[id], textarea[id]').forEach((el) => {
     campos[el.id] = el.type === 'checkbox' ? el.checked : el.type === 'file' ? undefined : el.value;
@@ -237,6 +245,7 @@ function render(semRestaurar = false) {
   const selStart = document.activeElement?.selectionStart;
   const scroll = window.scrollY;
 
+  $app.classList.toggle("modo-ver", !!S.verComo);
   $app.innerHTML = tela();
 
   for (const [id, v] of Object.entries(campos)) {
@@ -297,12 +306,12 @@ function topo() {
        ...(isAdmin() ? [['valores', 'Conferência de valores'], ['aprovacao', 'Aprovação final']] : []), ['tabela', 'Tabela de valores'],
        ...(isAdmin() ? [['usuarios', 'Usuários'], ['importar', 'Importar histórico']] : [])]
     : [['lancar', 'Minhas sessões'], ['carteira', 'Minha carteira'], ['historico', 'Meus fechamentos']];
-  return `${DEMO ? '<div class="demo-faixa">Modo demonstração — dados fictícios. Preencha o firebase-config.js para usar de verdade.</div>' : ''}
+  return `${S.verComo ? `<div class="demo-faixa ver-como">Você está vendo o sistema como <b>${esc(S.perfil.nome)}</b> (coach) — só visualização, nada pode ser alterado. <button class="btn sm" data-acao="sairVerComo">Voltar ao administrador</button></div>` : ''}${DEMO ? '<div class="demo-faixa">Modo demonstração — dados fictícios. Preencha o firebase-config.js para usar de verdade.</div>' : ''}
   <header class="topo"><div class="topo-in">
     <div class="marca"><span class="selo">CS</span>${esc(NOME_SISTEMA)}</div>
     <nav class="nav">${itens.map(([v, t]) => `<button data-acao="ir" data-view="${v}" ${S.view === v ? 'aria-current="page"' : ''}>${t}</button>`).join('')}</nav>
     <div class="quem"><span><b>${esc(S.perfil.nome)}</b> <span class="email">· ${esc(PAPEIS[S.perfil.papel] || '')}</span></span>
-      <button class="ico" data-acao="modal" data-tipo="senha">Senha</button>
+      ${S.verComo ? '' : '<button class="ico" data-acao="modal" data-tipo="senha">Senha</button>'}
       <button class="ico" data-acao="sair">Sair</button></div>
   </div></header>`;
 }
@@ -678,7 +687,7 @@ function vUsuarios() {
     ${lista.map((u) => { const cfg = cfgCoach(u); return `<tr><td><b>${esc(u.nome)}</b></td><td>${esc(u.email)}</td><td>${PAPEIS[u.papel] || u.papel}</td>
       <td class="num">${u.papel === 'coach' ? `A ${fmtUSD(cfg.valorA)} · B ${fmtUSD(cfg.valorB)}${cfg.limiteA ? ` · ${cfg.limiteA} primeiros = A` : ''}${cfg.extras.length ? ` · ${cfg.extras.length} extra(s)` : ''}` : '<span class="nota">—</span>'}</td>
       <td>${u.ativo === false ? '<span class="pill p-aberto">Desativado</span>' : '<span class="pill p-aprovada">Ativo</span>'}</td>
-      <td class="r"><button class="ico" data-acao="modal" data-tipo="usuario" data-id="${u.id}">Editar</button></td></tr>`; }).join('')}
+      <td class="r" style="white-space:nowrap">${u.papel === 'coach' && u.ativo !== false ? `<button class="ico" data-acao="verComo" data-id="${u.id}">Ver como coach</button>` : ''}<button class="ico" data-acao="modal" data-tipo="usuario" data-id="${u.id}">Editar</button></td></tr>`; }).join('')}
     </tbody></table></div></section>`;
 }
 
@@ -1088,6 +1097,20 @@ const acoes = {
     const email = val('l-email');
     if (!email) return toast('Digite seu e-mail no campo acima e clique de novo em "Esqueci minha senha".', true);
     await tentar(() => B.auth.reset(email), 'Se o e-mail estiver cadastrado, você receberá um link para criar nova senha.');
+  },
+  verComo(d) {
+    if (!isAdmin()) return;
+    const c = S.usuarios.find((u) => u.id === d.id);
+    if (!c) return;
+    S.perfilAdmin = S.perfil; S.verComo = c.id; S.perfil = { ...c, papel: 'coach' };
+    Object.assign(S, { view: 'lancar', edit: null, novoCliente: false, servicoSel: 'sessao', clienteSel: '', contratoSel: '', modal: null });
+    S.sel.clear(); render(true); window.scrollTo(0, 0);
+  },
+  sairVerComo() {
+    const id = S.verComo;
+    S.verComo = null; S.perfil = S.perfilAdmin; S.perfilAdmin = null;
+    Object.assign(S, { view: 'usuarios', edit: null, novoCliente: false, servicoSel: 'sessao', clienteSel: '', contratoSel: '', modal: null, coachSel: id });
+    render(true); window.scrollTo(0, 0);
   },
   ir(d) { S.view = d.view; S.edit = null; S.sel.clear(); S.filtro = 'todas'; S.modal = null; render(); window.scrollTo(0, 0); },
   mes(d) { S.mes = somaMes(S.mes, +d.d); S.edit = null; S.sel.clear(); assinarSessoes(); render(); },
@@ -1673,12 +1696,14 @@ $app.addEventListener('click', (ev) => {
   if (el.type === 'checkbox') { acoes[el.dataset.acao](el.dataset, el, ev); return; }
   if (el.dataset.acao === 'fundoModal' && ev.target !== el) return;
   ev.preventDefault();
+  if (S.verComo && ['modal', 'excluir', 'reenviar'].includes(el.dataset.acao)) return toast('Modo "ver como coach": é só visualização.', true);
   acoes[el.dataset.acao](el.dataset, el, ev);
 });
 $app.addEventListener('submit', async (ev) => {
   const f = ev.target.closest('form[data-form]');
   if (!f || !forms[f.dataset.form]) return;
   ev.preventDefault();
+  if (S.verComo) return toast('Modo "ver como coach": é só visualização, nada foi enviado.', true);
   const btn = f.querySelector('button[type="submit"]');
   if (btn?.disabled) return;
   if (btn) btn.disabled = true;
